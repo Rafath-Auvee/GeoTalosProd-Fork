@@ -683,8 +683,8 @@ services:
     command: --config /config.yaml
     volumes:
       - ./infra/docker/martin/config.yaml:/config.yaml:ro
-    ports:
-      - "${MARTIN_PORT:-3000}:3000"
+    # ports:
+    #   - "${MARTIN_PORT:-3000}:3000"
     depends_on:
       app-db:
         condition: service_healthy
