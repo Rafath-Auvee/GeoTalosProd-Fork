@@ -15,7 +15,7 @@ def test_tile_without_token_is_rejected(client, monkeypatch):
     monkeypatch.setattr(clerk_auth.settings, "ENVIRONMENT", "production")
 
     forward = AsyncMock()
-    monkeypatch.setattr(annotation_sets, "forward_tile", forward)
+    monkeypatch.setattr(annotation_sets, "cached_forward_tile", forward)
 
     response = client.get(
         f"/api/v1/annotation-sets/{uuid4()}/tiles/14/12306/7077.pbf"
@@ -39,7 +39,7 @@ def test_tile_without_organization_is_rejected(client, monkeypatch):
     )
 
     forward = AsyncMock()
-    monkeypatch.setattr(annotation_sets, "forward_tile", forward)
+    monkeypatch.setattr(annotation_sets, "cached_forward_tile", forward)
 
     response = client.get(
         f"/api/v1/annotation-sets/{uuid4()}/tiles/14/12306/7077.pbf"
@@ -67,7 +67,7 @@ def test_tile_excludes_deleted_sets(client, monkeypatch):
     )
 
     forward = AsyncMock()
-    monkeypatch.setattr(annotation_sets, "forward_tile", forward)
+    monkeypatch.setattr(annotation_sets, "cached_forward_tile", forward)
 
     response = client.get(
         f"/api/v1/annotation-sets/{uuid4()}/tiles/14/12306/7077.pbf"
@@ -86,13 +86,13 @@ def test_tile_excludes_deleted_sets(client, monkeypatch):
 def test_tile_out_of_bounds_never_forwards(client, monkeypatch, x, y):
     set_id = uuid4()
 
-    get_set = AsyncMock(return_value=SimpleNamespace(id=set_id))
+    get_set = AsyncMock(return_value=SimpleNamespace(id=set_id, tile_version=1))
     monkeypatch.setattr(
         annotation_sets.AnnotationSetService, "get_set", get_set
     )
 
     forward = AsyncMock()
-    monkeypatch.setattr(annotation_sets, "forward_tile", forward)
+    monkeypatch.setattr(annotation_sets, "cached_forward_tile", forward)
 
     response = client.get(
         f"/api/v1/annotation-sets/{set_id}/tiles/14/{x}/{y}.pbf"
@@ -121,7 +121,7 @@ def test_tile_upstream_failure(
     monkeypatch.setattr(
         annotation_sets.AnnotationSetService,
         "get_set",
-        AsyncMock(return_value=SimpleNamespace(id=set_id)),
+        AsyncMock(return_value=SimpleNamespace(id=set_id, tile_version=1)),
     )
 
     upstream_get = AsyncMock()
@@ -147,7 +147,7 @@ def test_tile_upstream_failure(
     assert response.status_code == expected_status, response.text
     assert response.json() == {"detail": expected_detail}
     upstream_get.assert_awaited_once_with(
-        f"/annotation_set_mvt/14/12306/7077?set_id={set_id}"
+        f"/annotation_set_mvt/14/12306/7077?set_id={set_id}&v=1"
     )
 
 
@@ -157,7 +157,7 @@ def test_tile_success_response(client, monkeypatch, upstream_status):
     monkeypatch.setattr(
         annotation_sets.AnnotationSetService,
         "get_set",
-        AsyncMock(return_value=SimpleNamespace(id=set_id)),
+        AsyncMock(return_value=SimpleNamespace(id=set_id, tile_version=1)),
     )
 
     body = b"test-tile-bytes" if upstream_status == 200 else b""
@@ -187,5 +187,5 @@ def test_tile_success_response(client, monkeypatch, upstream_status):
         assert response.headers["content-type"] == "application/x-protobuf"
 
     upstream_get.assert_awaited_once_with(
-        f"/annotation_set_mvt/14/12306/7077?set_id={set_id}"
+        f"/annotation_set_mvt/14/12306/7077?set_id={set_id}&v=1"
     )

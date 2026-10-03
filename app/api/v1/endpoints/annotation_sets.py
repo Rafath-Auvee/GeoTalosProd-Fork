@@ -7,7 +7,7 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
 
 from fastapi.responses import Response
-from app.services.tile_proxy import forward_tile
+from app.services.tile_proxy import cached_forward_tile
 
 from pydantic import BaseModel, Field
 from sqlalchemy import select, text
@@ -231,15 +231,21 @@ async def get_annotation_set_tile(
             detail="Tile coordinates are outside the zoom level bounds",
         )
 
+    # The version goes to Martin too: Martin caches by full URL, so without it
+    # an edited set would keep serving Martin's stale bytes.
+    version = annotation_set.tile_version
     url = (
         f"/annotation_set_mvt/{z}/{x}/{y}"
-        f"?set_id={annotation_set.id}"
+        f"?set_id={annotation_set.id}&v={version}"
     )
+    cache_key = f"tile:{org_id}:{annotation_set.id}:{version}:{z}:{x}:{y}"
 
-    response = await forward_tile(
+    response = await cached_forward_tile(
+        request.app.state.tile_cache,
+        cache_key,
         request.app.state.martin_client,
         url,
-        default_content_type="application/x-protobuf",
+        content_type="application/x-protobuf",
     )
     response.headers["Cache-Control"] = "private, no-store"
     return response

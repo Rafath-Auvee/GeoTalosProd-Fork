@@ -3,6 +3,8 @@ import logging
 import httpx
 from fastapi import HTTPException
 from fastapi.responses import Response
+from redis.asyncio import Redis
+from redis.exceptions import RedisError
 
 logger = logging.getLogger(__name__)
 
@@ -59,3 +61,38 @@ async def forward_tile(
         media_type=content_type,
         headers=headers,
     )
+
+
+async def cached_forward_tile(
+    cache: Redis | None,
+    key: str,
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    content_type: str,
+) -> Response:
+    """forward_tile() behind a Redis cache keyed by the caller.
+
+    The caller must check access first and put everything that changes the
+    bytes (org, set, version, z/x/y) in ``key``. Only 200 and 204 responses are
+    stored; an empty value means 204. Redis errors fall back to the upstream.
+    """
+    if cache is not None:
+        try:
+            cached = await cache.get(key)
+        except (RedisError, OSError) as exc:
+            logger.warning("Tile cache read failed: %s", exc)
+        else:
+            if cached is not None:
+                if not cached:
+                    return Response(status_code=204)
+                return Response(content=cached, media_type=content_type)
+
+    response = await forward_tile(client, url, default_content_type=content_type)
+
+    if cache is not None:
+        try:
+            await cache.set(key, response.body if response.status_code == 200 else b"")
+        except (RedisError, OSError) as exc:
+            logger.warning("Tile cache write failed: %s", exc)
+    return response
