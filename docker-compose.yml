@@ -327,6 +327,32 @@ services:
       com.awakeforest.service: redis
       com.awakeforest.role: broker
 
+  # Annotation vector-tile cache. Separate from `redis` so evicting tile bytes
+  # can never evict Celery queue/result or event data. Keys are versioned
+  # (tile:{org}:{set}:{tile_version}:{z}:{x}:{y}); old versions age out via LRU.
+  # No persistence and no host port: only the API reaches it.
+  redis-tiles:
+    image: redis:7.2-alpine
+    container_name: awakeforest-redis-tiles
+    restart: unless-stopped
+    command: >
+      redis-server
+      --save ""
+      --appendonly no
+      --maxmemory ${TILE_CACHE_MAXMEM:-256mb}
+      --maxmemory-policy allkeys-lru
+      --requirepass ${REDIS_PASSWORD:-redis_pass}
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redis_pass}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - awakeforest-backend
+    labels:
+      com.awakeforest.service: redis-tiles
+      com.awakeforest.role: cache
+
   # ============================================================================
   # OBJECT STORAGE  (MinIO — S3-compatible)
   # ============================================================================
@@ -419,6 +445,7 @@ services:
     container_name: awakeforest-api
     environment:
       <<: *app-env
+      TILE_CACHE_REDIS_URL: redis://:${REDIS_PASSWORD:-redis_pass}@redis-tiles:6379/0
     extra_hosts:              
       - "host.docker.internal:host-gateway"
     # --reload watches for source changes; remove in staging/production
@@ -436,6 +463,9 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      # Started, not healthy: the tile cache is optional and the API falls back to Martin.
+      redis-tiles:
+        condition: service_started
       minio:
         condition: service_healthy
       titiler:

@@ -77,8 +77,8 @@ def test_tile_access_with_postgres_rows(client, monkeypatch, case):
     ))
     monkeypatch.setattr(client.app.state.martin_client, "get", upstream_get)
     # Spy on the real helper; do not replace the service or its SQL lookup.
-    forward = AsyncMock(wraps=annotation_sets.forward_tile)
-    monkeypatch.setattr(annotation_sets, "forward_tile", forward)
+    forward = AsyncMock(wraps=annotation_sets.cached_forward_tile)
+    monkeypatch.setattr(annotation_sets, "cached_forward_tile", forward)
 
     response = client.get(
         f"/api/v1/annotation-sets/{set_id}/tiles/14/12306/7077.pbf"
@@ -88,7 +88,7 @@ def test_tile_access_with_postgres_rows(client, monkeypatch, case):
         assert response.content == b"tile"
         assert response.headers["cache-control"] == "private, no-store"
         upstream_get.assert_awaited_once_with(
-            f"/annotation_set_mvt/14/12306/7077?set_id={set_id}"
+            f"/annotation_set_mvt/14/12306/7077?set_id={set_id}&v=1"
         )
     else:
         assert response.status_code == 404, response.text
