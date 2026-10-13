@@ -65,3 +65,12 @@ postgres:
     annotation_set_mvt:
       schema: public
       function: annotation_set_mvt
+
+# Public reference layers: every <name>.mbtiles in the mounted /tiles folder
+# becomes source <name>. A folder (not a file list) so a missing or not-yet-built
+# tileset cannot stop Martin, which would take the annotation tiles down too.
+# Only names in REFERENCE_LAYERS (app/api/v1/endpoints/reference_layers.py)
+# are exposed by the API.
+mbtiles:
+  paths:
+    - /tiles

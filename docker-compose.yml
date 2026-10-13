@@ -724,6 +724,8 @@ services:
     command: --config /config.yaml
     volumes:
       - ./infra/docker/martin/config.yaml:/config.yaml:ro
+      # Pre-built public reference tilesets (Tippecanoe .mbtiles), read-only.
+      - ${REFERENCE_TILES_DIR:-./data/reference-tiles}:/tiles:ro
     # ports:
     #   - "${MARTIN_PORT:-3000}:3000"
     depends_on:
