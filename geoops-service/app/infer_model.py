@@ -22,6 +22,7 @@ import torch
 from PIL import Image
 
 from app.detect_model import INPUT_SIZE
+from app.device import DEVICE
 
 
 def _pixel_box_to_geojson(box: list[float], item_bbox: list[float]) -> dict[str, Any]:
@@ -57,7 +58,7 @@ def run_detect_inference(
     raw = base64.b64decode(image_base64)
     img = Image.open(io.BytesIO(raw)).convert("RGB").resize((INPUT_SIZE, INPUT_SIZE))
     arr = torch.from_numpy(np.array(img)).float() / 255.0
-    tensor = arr.permute(2, 0, 1)
+    tensor = arr.permute(2, 0, 1).to(DEVICE)
 
     model.eval()
     with torch.no_grad():

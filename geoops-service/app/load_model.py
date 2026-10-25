@@ -44,6 +44,26 @@ def load_trained_detect_model(org_id: str, artifact_key: str) -> torch.nn.Module
     return model
 
 
+def load_trained_segment_model(org_id: str, artifact_key: str) -> torch.nn.Module:
+    cache_key = (str(org_id), artifact_key, "segment")
+    cached = _model_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    artifact = torch.load(io.BytesIO(get_bytes(org_id, artifact_key)), map_location="cpu", weights_only=False)
+    if artifact.get("kind") != "segment":
+        raise ValueError(f"Artifact kind '{artifact.get('kind')}' is not 'segment'")
+
+    from app.segment_model import build_segment  # noqa: PLC0415
+
+    model = build_segment(artifact["backbone_key"])
+    model.backbone.pyramid.load_state_dict(artifact["pyramid_state_dict"])
+    model.head.load_state_dict(artifact["head_state_dict"])
+    model.eval()
+    _model_cache[cache_key] = model
+    return model
+
+
 def load_trained_classify_model(org_id: str, artifact_key: str) -> torch.nn.Module:
     cache_key = (str(org_id), artifact_key, "classify")
     cached = _model_cache.get(cache_key)

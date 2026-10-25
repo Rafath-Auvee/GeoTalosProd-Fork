@@ -12,6 +12,7 @@ from __future__ import annotations
 from torchvision.models.detection.anchor_utils import AnchorGenerator
 from torchvision.models.detection.fcos import FCOS
 
+from app.device import DEVICE
 from app.dinov2_backbone import Dinov2FeaturePyramidBackbone
 
 # Input images are resized to this fixed square before reaching the model
@@ -47,4 +48,8 @@ def build_fcos(backbone_key: str, num_classes: int) -> FCOS:
         # grid always tiles evenly — see Dinov2FeaturePyramidBackbone.forward.
         size_divisible=14,
     )
-    return model
+    # Moves the trainable pyramid + FCOS head onto DEVICE; the frozen DINOv2
+    # backbone is already there (see dinov2_backbone.load_dinov2_raw) so this
+    # is a no-op for it. Centralized here so every caller (train/eval/infer)
+    # gets a fully device-consistent model with no extra .to(DEVICE) calls.
+    return model.to(DEVICE)

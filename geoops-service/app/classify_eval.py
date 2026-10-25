@@ -7,6 +7,7 @@ from __future__ import annotations
 import torch
 
 from app.classify_dataset import ClassifyExample
+from app.device import DEVICE
 
 
 def evaluate_classify(model, examples: list[ClassifyExample], score_thresh: float = 0.5) -> dict:
@@ -14,7 +15,7 @@ def evaluate_classify(model, examples: list[ClassifyExample], score_thresh: floa
     tp = fp = tn = fn = 0
     with torch.no_grad():
         for ex in examples:
-            logit = model(ex.image.unsqueeze(0))[0]
+            logit = model(ex.image.unsqueeze(0).to(DEVICE))[0]
             score = torch.sigmoid(logit).item()
             pred_positive = score >= score_thresh
             actual_positive = ex.label > 0.5

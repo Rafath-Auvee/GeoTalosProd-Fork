@@ -12,6 +12,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 
+from app.device import DEVICE
 from app.dinov2_backbone import load_dinov2_raw
 
 INPUT_SIZE = 518  # same fixed input size as the detect tier — patch_size=14 grid
@@ -37,7 +38,7 @@ class ClassifyHead(nn.Module):
         reasoning as Dinov2FeaturePyramidBackbone.extract_tokens.
         """
         with torch.no_grad():
-            out = self.dinov2(pixel_values=x)
+            out = self.dinov2(pixel_values=x.to(DEVICE))
             return out.last_hidden_state[:, 0, :]  # CLS token, (B, hidden_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -45,4 +46,7 @@ class ClassifyHead(nn.Module):
 
 
 def build_classifier(backbone_key: str) -> ClassifyHead:
-    return ClassifyHead(backbone_key)
+    # Only self.linear needs moving (self.dinov2 is already on DEVICE — see
+    # dinov2_backbone.load_dinov2_raw) but .to(DEVICE) on the whole module is
+    # a no-op for it either way, and keeps this symmetric with build_fcos.
+    return ClassifyHead(backbone_key).to(DEVICE)

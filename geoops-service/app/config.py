@@ -14,6 +14,12 @@ class Settings(BaseSettings):
     # Where backbone checkpoints get cached (HuggingFace hub downloads).
     MODEL_CACHE_DIR: str = "/srv/model-cache"
 
+    # SAM3 checkpoint for /autoannotate — bind-mounted read-only from the host
+    # (see docker-compose.yml's geoops-service volumes), not an S3 training
+    # artifact this service produces itself.
+    SAM3_MODEL_PATH: str = "/srv/models/sam3.pt"
+    YOLO_MODELS_DIR: str = "/srv/models/yolo"  # pretrained YOLO weights to start from (mounted read-only)
+
     # MinIO/S3 — same bucket-per-org convention app.services.storage_service
     # uses (bucket = f"{S3_BUCKET_PREFIX}{org_id}"). This service reads the
     # training-runs/{job_id}/... objects geoops.dino_tasks/yolo_tasks wrote.

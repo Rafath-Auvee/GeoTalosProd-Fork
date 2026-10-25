@@ -15,7 +15,7 @@ import uuid
 from datetime import datetime
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, UniqueConstraint, func, text
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -144,3 +144,109 @@ class EmbeddingTile(Base):
     model: Mapped["AIModel | None"] = relationship("AIModel")
     dataset_item: Mapped["DatasetItem"] = relationship("DatasetItem")
     created_by_job: Mapped["Job"] = relationship("Job")
+
+
+class DinoDataset(Base):
+    """A reusable, inspectable training dataset for one DINOv2 head: tiles of
+    one exhaustively-labeled AOI, already split into train/eval/test.
+
+    Built once (``POST /dino/datasets``), reviewed in the UI, then trained on
+    any number of times (``POST /dino/finetune``) without being regenerated.
+    Several datasets may exist for the same collection/class/AOI — e.g. a
+    detect and a classify one, or the same task at two tile scales — so
+    there is deliberately no uniqueness constraint; a rebuild targets one
+    dataset by id and overwrites that dataset only.
+
+    ``params`` holds the build inputs (tile scale, crop size, splits, ...).
+    ``data_fingerprint`` hashes the annotation data the last successful build
+    used; when the live data no longer hashes to it the dataset is *stale*
+    and the user is asked to rebuild before training. A classify dataset
+    cloned from a detect one (``source_dataset_id``) reuses the source's tile
+    images and only writes its own manifest with 0/1 labels.
+    """
+
+    __tablename__ = "dino_datasets"
+    __table_args__ = (
+        CheckConstraint("task IN ('detect', 'classify', 'segment', 'yolo')", name="ck_dino_datasets_task"),
+        CheckConstraint(
+            "status IN ('pending', 'building', 'ready', 'failed')", name="ck_dino_datasets_status"
+        ),
+        Index("idx_dino_datasets_org_scope", "organization_id", "annotation_set_collection_id", "class_id", "aoi_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    annotation_set_collection_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("annotation_set_collections.id", ondelete="CASCADE"), nullable=False
+    )
+    class_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("annotation_classes.id", ondelete="CASCADE"), nullable=False
+    )
+    aoi_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("map_aois.id", ondelete="CASCADE"), nullable=False
+    )
+    # Optional wider scope (NULL = the original one-AOI / collection-verified-sets behaviour):
+    # every AOI the dataset covers (``aoi_id`` is the first) and the exact annotation sets used.
+    aoi_ids: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    # Several classes (a multi-class YOLO dataset); ``class_id`` is the first. NULL = the one class.
+    class_ids: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    annotation_set_ids: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    task: Mapped[str] = mapped_column(String(20), nullable=False)
+    params: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="pending")
+    build_no: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    data_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    stats: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    s3_prefix: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    source_dataset_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("dino_datasets.id", ondelete="SET NULL"), nullable=True
+    )
+    source_build_no: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    job_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="SET NULL"), nullable=True
+    )
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class DinoTunedConfig(Base):
+    """The Optuna result for one (dataset, model): tuned once, reused by every later run.
+
+    ``model_key`` is the DINOv2 backbone key ('dinov2-vits14') or, for YOLO, the base weights
+    the run started from. A row is only valid for the dataset build it was tuned on
+    (``dataset_build_no``) — after a rebuild the next auto-tuned run replaces it. ``multirun``
+    holds the latest multi-seed report (mean / std per metric, per-seed values) that was run
+    with ``best_params``.
+    """
+
+    __tablename__ = "dino_tuned_configs"
+    __table_args__ = (UniqueConstraint("dataset_id", "model_key", name="uq_dino_tuned_configs_dataset_model"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
+    )
+    dataset_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("dino_datasets.id", ondelete="CASCADE"), nullable=False
+    )
+    dataset_build_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    model_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    best_params: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    tuning: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    multirun: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    job_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )

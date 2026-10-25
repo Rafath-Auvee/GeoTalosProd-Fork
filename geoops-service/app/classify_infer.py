@@ -18,6 +18,7 @@ import torch
 from PIL import Image
 
 from app.classify_model import INPUT_SIZE
+from app.device import DEVICE
 
 
 def run_classify_inference(
@@ -35,7 +36,7 @@ def run_classify_inference(
     raw = base64.b64decode(image_base64)
     img = Image.open(io.BytesIO(raw)).convert("RGB").resize((INPUT_SIZE, INPUT_SIZE))
     arr = torch.from_numpy(np.array(img)).float() / 255.0
-    tensor = arr.permute(2, 0, 1)
+    tensor = arr.permute(2, 0, 1).to(DEVICE)
 
     model.eval()
     with torch.no_grad():

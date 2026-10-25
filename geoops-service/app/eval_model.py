@@ -11,6 +11,7 @@ import numpy as np
 import torch
 
 from app.dataset import Example
+from app.device import DEVICE
 
 
 def _iou(box_a: list[float], box_b: list[float]) -> float:
@@ -33,7 +34,7 @@ def evaluate_detect(model: torch.nn.Module, examples: list[Example], iou_thresh:
 
     with torch.no_grad():
         for img_idx, ex in enumerate(examples):
-            pred = model([ex.image])[0]
+            pred = model([ex.image.to(DEVICE)])[0]
             for box, score in zip(pred["boxes"].tolist(), pred["scores"].tolist(), strict=True):
                 all_preds.append((img_idx, box, score))
             for box in ex.boxes.tolist():

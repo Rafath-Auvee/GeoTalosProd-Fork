@@ -14,11 +14,14 @@ from app.schemas.job import JobRead
 from geoops.schemas import (
     AnomalyDetectionRequest,
     AOIScanRequest,
+    AutoAnnotateRequest,
     EmbeddingCreateRequest,
     EmbeddingRead,
     EmbeddingSearchMatch,
     EmbeddingSearchRequest,
+    ExemplarScanRequest,
 )
+from geoops.dino_service import DinoExportService
 from geoops.service import EmbeddingService
 
 router = APIRouter(prefix="/embeddings", tags=["embeddings"])
@@ -109,6 +112,123 @@ async def aoi_scan(
     from geoops.tasks import run_aoi_scan  # noqa: PLC0415
 
     run_aoi_scan.apply_async(args=[str(job.id)])
+    return job
+
+
+@router.post("/exemplar-scan", response_model=JobRead, status_code=status.HTTP_202_ACCEPTED)
+async def exemplar_scan(
+    payload: ExemplarScanRequest,
+    org_id: UUID = Depends(require_org_role("org:viewer")),
+    db: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Multi-exemplar similarity scan over an AOI (async job).
+
+    Auto-infers the working resolution/tile-overlap from the reference
+    embeddings' own real-world size, tiles the AOI SAHI-style (overlapping
+    tiles, not the non-overlapping grid `aoi-scan` uses), embeds each new
+    tile, scores against every reference (minus any supplied hard negatives),
+    merges duplicates across overlapping tiles via NMS, and optionally
+    tightens the surviving top_k boxes through a registered SAM3 model. Poll
+    ``GET /api/jobs/{job_id}`` for ``config.result`` once ``status ==
+    "completed"``.
+    """
+    service = EmbeddingService(db)
+    for ref_id in payload.reference_embedding_ids:
+        await service.get_embedding(org_id, ref_id)
+    for neg_id in payload.negative_embedding_ids:
+        await service.get_embedding(org_id, neg_id)
+    await service._resolve_class_and_annotation(org_id, None, payload.output_class_id)  # noqa: SLF001
+    if payload.sam_model_id is not None:
+        await service._get_model(org_id, payload.sam_model_id)  # noqa: SLF001
+
+    rows = await db.scalars(
+        select(DatasetItem).where(
+            DatasetItem.id.in_(payload.dataset_item_ids),
+            DatasetItem.organization_id == org_id,
+            DatasetItem.is_active.is_(True),
+        )
+    )
+    if len(rows.all()) != len(set(payload.dataset_item_ids)):
+        raise HTTPException(status_code=404, detail="One or more dataset items not found")
+
+    job = Job(
+        organization_id=org_id,
+        type=JobType.EXEMPLAR_SCAN,
+        status=JobStatus.QUEUED,
+        config={"request": payload.model_dump(mode="json")},
+        input_refs=[
+            {"type": "dataset_item", "id": str(item_id)} for item_id in payload.dataset_item_ids
+        ],
+        created_by_user_id=current_user.id,
+    )
+    db.add(job)
+    await db.commit()
+    await db.refresh(job)
+
+    from geoops.exemplar_tasks import run_exemplar_scan  # noqa: PLC0415
+
+    run_exemplar_scan.apply_async(args=[str(job.id)])
+    return job
+
+
+@router.post("/auto-annotate", response_model=JobRead, status_code=status.HTTP_202_ACCEPTED)
+async def auto_annotate(
+    payload: AutoAnnotateRequest,
+    org_id: UUID = Depends(require_org_role("org:viewer")),
+    db: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """"Pick a class, click run" similarity scan (async job).
+
+    Same collection + class inputs as ``POST /dino/finetune`` (Train Head):
+    a handful of that class's existing verified annotations are auto-embedded
+    and used as the exemplar set — no manual reference-box drawing needed.
+    Poll ``GET /api/jobs/{job_id}`` for ``config.result`` once ``status ==
+    "completed"``.
+    """
+    dino_service = DinoExportService(db)
+    preview = await dino_service.build_preview(org_id, payload.annotation_set_collection_id, payload.class_id)
+    if not preview.ready:
+        raise HTTPException(
+            status_code=400,
+            detail="Nothing eligible: 0 verified, resolvable-item annotations of this class.",
+        )
+
+    embed_service = EmbeddingService(db)
+    await embed_service._get_model(org_id, payload.embedding_model_id)  # noqa: SLF001
+    if payload.sam_model_id is not None:
+        await embed_service._get_model(org_id, payload.sam_model_id)  # noqa: SLF001
+
+    rows = await db.scalars(
+        select(DatasetItem).where(
+            DatasetItem.id.in_(payload.dataset_item_ids),
+            DatasetItem.organization_id == org_id,
+            DatasetItem.is_active.is_(True),
+        )
+    )
+    if len(rows.all()) != len(set(payload.dataset_item_ids)):
+        raise HTTPException(status_code=404, detail="One or more dataset items not found")
+
+    job = Job(
+        organization_id=org_id,
+        type=JobType.EXEMPLAR_SCAN,
+        status=JobStatus.QUEUED,
+        config={"request": payload.model_dump(mode="json")},
+        input_refs=[
+            {"type": "annotation_set_collection", "id": str(payload.annotation_set_collection_id)},
+            {"type": "annotation_class", "id": str(payload.class_id)},
+        ]
+        + [{"type": "dataset_item", "id": str(item_id)} for item_id in payload.dataset_item_ids],
+        created_by_user_id=current_user.id,
+    )
+    db.add(job)
+    await db.commit()
+    await db.refresh(job)
+
+    from geoops.exemplar_tasks import run_auto_annotate  # noqa: PLC0415
+
+    run_auto_annotate.apply_async(args=[str(job.id)])
     return job
 
 

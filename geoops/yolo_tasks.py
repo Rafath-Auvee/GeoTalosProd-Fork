@@ -82,18 +82,38 @@ def _pad_bbox(bbox: list[float], item_bbox: list[float], fraction: float) -> lis
     ]
 
 
-def _fetch_crop_png(item: DatasetItem, bbox: list[float], width_px: int, height_px: int) -> bytes:
+def _fetch_crop_png(
+    item: DatasetItem,
+    bbox: list[float],
+    width_px: int,
+    height_px: int,
+    *,
+    rescale: str | None = None,
+    asset_bidx: str | None = None,
+) -> bytes:
     # Same asset/bidx convention geoops.service._crop_png_b64 uses: "data" is
     # this codebase's standard single-asset COG key, and forcing an explicit
     # 3-band RGB selection avoids rio-tiler PNG-encoder errors on band counts
     # TiTiler can't auto-select a sane default for.
+    #
+    # rescale is optional but important for uint16/int16 COGs: without it,
+    # TiTiler falls back to stretching the dtype's full numeric range (e.g.
+    # -32768..32767 for int16) instead of this dataset's actual value range,
+    # which renders as a near-flat mid-grey image when real values cluster
+    # in a narrow band far from that assumed range. Callers that care about
+    # visual fidelity (training-crop exporters) should resolve a real
+    # rescale once per item via geoops.export_common.resolve_rescale_params
+    # and pass it through; omit it only for callers that don't render pixels
+    # themselves (e.g. pure geometry/label export paths never did either).
     bbox_csv = ",".join(str(float(v)) for v in bbox)
     base_url = settings.TITILER_URL.rstrip("/")
     endpoint = (
         f"{base_url}/collections/{item.stac_collection_id}"
         f"/items/{item.stac_item_id}/bbox/{bbox_csv}/{width_px}x{height_px}.png"
     )
-    params = {"assets": "data", "asset_bidx": "data|1,2,3"}
+    params = {"assets": "data", "asset_bidx": asset_bidx or "data|1,2,3"}
+    if rescale:
+        params["rescale"] = rescale
     url = f"{endpoint}?{parse.urlencode(params)}"
     req = urlrequest.Request(url, method="GET")
     with urlrequest.urlopen(req, timeout=60.0) as resp:  # nosec B310
