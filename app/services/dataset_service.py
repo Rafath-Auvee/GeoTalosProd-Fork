@@ -61,11 +61,16 @@ class DatasetService:
 
     async def get_dataset(self, dataset_id: UUID, organization_id: UUID | None = None) -> Dataset:
         if organization_id is None:
-            dataset = await self.db.get(Dataset, dataset_id)
+            result = await self.db.execute(
+                select(Dataset).where(Dataset.id == dataset_id, Dataset.deleted_at.is_(None))
+            )
+            dataset = result.scalar_one_or_none()
         else:
             result = await self.db.execute(
                 select(Dataset).where(
-                    Dataset.id == dataset_id, Dataset.organization_id == organization_id
+                    Dataset.id == dataset_id,
+                    Dataset.organization_id == organization_id,
+                    Dataset.deleted_at.is_(None),
                 )
             )
             dataset = result.scalar_one_or_none()

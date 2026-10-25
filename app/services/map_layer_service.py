@@ -10,6 +10,7 @@ from app.config import settings
 from app.core.exceptions import bad_request, conflict, not_found
 from app.models.annotation_set import AnnotationSet
 from app.models.map import Map
+from app.models.map_annotation_set import MapAnnotationSet
 from app.models.map_layer import MapLayer
 from app.models.project import Project
 from app.schemas.map_layer import MapLayerCreate, MapLayerUpdate
@@ -70,10 +71,45 @@ class MapLayerService:
             raise not_found("MapLayer")
         return layer
 
+    async def _find_existing_layer(self, map_id: UUID, payload: MapLayerCreate) -> MapLayer | None:
+        """Look up an existing row for this map + logical source, matching
+        the three source types the DB now enforces uniqueness for (see
+        migration 062). dataset/stac_item/annotation_set each have a clean
+        single-column identity; tile_service is left unchecked (looser,
+        nullable-url-or-source-id identity, no observed duplication).
+        """
+        if payload.source_type == "dataset" and payload.dataset_id is not None:
+            where = (MapLayer.source_type == "dataset", MapLayer.dataset_id == payload.dataset_id)
+        elif payload.source_type == "stac_item" and payload.stac_item_id is not None:
+            where = (MapLayer.source_type == "stac_item", MapLayer.stac_item_id == payload.stac_item_id)
+        elif payload.source_type == "annotation_set" and payload.annotation_set_id is not None:
+            where = (MapLayer.source_type == "annotation_set", MapLayer.annotation_set_id == payload.annotation_set_id)
+        else:
+            return None
+        result = await self.db.execute(select(MapLayer).where(MapLayer.map_id == map_id, *where))
+        return result.scalar_one_or_none()
+
     async def create_layer(
         self, map_id: UUID, organization_id: UUID, payload: MapLayerCreate
     ) -> MapLayer:
         await self._get_map_for_org(map_id, organization_id)
+
+        # Idempotent: a caller retrying after a dropped response, or a
+        # frontend sync effect whose in-memory "already persisted" tracking
+        # reset on reload (the actual root cause of the map_layers
+        # duplication this guards against — see migration 062), should get
+        # the existing row back rather than a duplicate. Treat it as an
+        # upsert of the display-state fields the frontend actually owns.
+        existing = await self._find_existing_layer(map_id, payload)
+        if existing is not None:
+            existing.visible = payload.visible
+            existing.opacity = payload.opacity
+            existing.z_index = payload.z_index
+            await self.db.commit()
+            await self.db.refresh(existing)
+            logger.info("create_layer_idempotent_hit layer_id=%s map_id=%s", existing.id, map_id)
+            return existing
+
         data = payload.model_dump()
         data["map_id"] = map_id
 
@@ -161,6 +197,20 @@ class MapLayerService:
         self, map_id: UUID, layer_id: UUID, organization_id: UUID
     ) -> None:
         layer = await self.get_layer(map_id, layer_id, organization_id)
+
+        # An annotation_set layer's real "is this mounted" record lives in
+        # map_annotation_sets, not here — deleting only this row left the
+        # mount in place, so the annotation set resurfaced as a "new" local
+        # layer on the next page load (MapEditorShell's sync effect) and
+        # got re-synced into a brand new map_layers row. Removing the mount
+        # in the same transaction is what makes delete actually stick.
+        if layer.source_type == "annotation_set" and layer.annotation_set_id is not None:
+            mount = await self.db.get(
+                MapAnnotationSet, {"map_id": map_id, "annotation_set_id": layer.annotation_set_id}
+            )
+            if mount is not None:
+                await self.db.delete(mount)
+
         await self.db.delete(layer)
         await self.db.commit()
         logger.info("delete_layer_success layer_id=%s", layer_id)

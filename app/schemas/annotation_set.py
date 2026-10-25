@@ -130,6 +130,9 @@ class AnnotationSetRead(ORMModel):
     review_status: str = "raw"
     # [minx, miny, maxx, maxy] over all live annotations; null when empty.
     extent_4326: list[float] | None = None
+    # Filled by the org-level list only (one grouped query), so rows can show them without N lookups.
+    annotation_count: int | None = None
+    schema_name: str | None = None
     created_by_user_id: UUID | None
     created_at: datetime
     updated_at: datetime
@@ -181,3 +184,12 @@ class RasterMaskValuesPreviewRead(ORMModel):
     values: list[float]
     total_unique: int
     truncated: bool
+
+
+class AnnotationSetBulkPurgeRequest(ORMModel):
+    ids: list[UUID] = Field(min_length=1, max_length=500)
+
+
+class AnnotationSetBulkPurgeResponse(ORMModel):
+    deleted: int
+    missing: list[UUID] = Field(default_factory=list, description="Ids that were not found in this organization.")

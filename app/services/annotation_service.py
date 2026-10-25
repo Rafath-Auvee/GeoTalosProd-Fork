@@ -177,6 +177,20 @@ class AnnotationService:
         )
 
         data = payload.model_dump()
+        map_id = data.pop("map_id", None)
+        if map_id is not None:
+            # Same soft AOI-provenance stamping as create_annotation_on_map —
+            # this endpoint is reached whenever the frontend already has a
+            # set open (e.g. re-annotating into an existing verified set)
+            # rather than the auto-resolve "on map" path, so without this an
+            # annotation drawn straight into an existing set never gets
+            # aoi_id even though it was drawn inside a tracked AOI.
+            aoi_meta = await self._resolve_aoi_for_geometry(map_id, organization_id, payload.geometry)
+            if aoi_meta is not None:
+                props = dict(data.get("properties") or {})
+                props["aoi_id"] = aoi_meta["aoi_id"]
+                props["aoi_name"] = aoi_meta["aoi_name"]
+                data["properties"] = props
         data["annotation_set_id"] = set_id
         data["geometry"] = parse_geometry(payload.geometry)
         data["created_by_user_id"] = created_by_user_id
@@ -233,6 +247,10 @@ class AnnotationService:
             set_dataset_item_id=annotation_set.dataset_item_id,
             payload_dataset_item_id=payload.dataset_item_id,
         )
+        if dataset_item_id is None:
+            dataset_item_id = await self._resolve_dataset_item_via_aoi(
+                map_id, organization_id, payload.geometry
+            )
 
         aoi_meta = await self._resolve_aoi_for_geometry(map_id, organization_id, payload.geometry)
         props = dict(payload.properties or {})
@@ -349,6 +367,83 @@ class AnnotationService:
                     return {"aoi_id": str(aoi.id), "aoi_name": aoi.name}
             except Exception:
                 continue
+        return None
+
+    async def _resolve_dataset_item_via_aoi(
+        self, map_id: UUID, organization_id: UUID, geometry: object
+    ) -> UUID | None:
+        """Fallback when the client didn't supply dataset_item_id: find the AOI
+        that contains this geometry, then the dataset item(s) selected for that
+        AOI (MapAOI.selection_config — same source the AOI panel's dataset list
+        is built from) whose own footprint actually contains the point.
+
+        This is why annotations were landing with no linked image (and getting
+        skipped at training-export time) even when the AOI panel showed a
+        dataset already selected: the frontend wasn't sending dataset_item_id,
+        and nothing was inferring it server-side. Unambiguous, and so safe to
+        auto-fill, when the AOI resolves to exactly one candidate item; genuine
+        ambiguity (multiple overlapping items, none uniquely containing the
+        point) is left unresolved rather than guessed.
+        """
+        rows = await self.db.scalars(
+            select(MapAOI).where(
+                MapAOI.map_id == map_id,
+                MapAOI.organization_id == organization_id,
+                MapAOI.deleted_at.is_(None),
+            )
+        )
+        aois = rows.all()
+        if not aois:
+            return None
+        try:
+            point = shape_geom(serialize_geometry(geometry)).representative_point()
+        except Exception:
+            return None
+
+        for aoi in aois:
+            try:
+                if isinstance(aoi.geometry, dict) and aoi.geometry:
+                    poly = shape_geom(aoi.geometry)
+                elif isinstance(aoi.bbox_4326, (list, tuple)) and len(aoi.bbox_4326) == 4:
+                    poly = shape_box(*[float(v) for v in aoi.bbox_4326])
+                else:
+                    continue
+                if not (poly.contains(point) or poly.intersects(point)):
+                    continue
+            except Exception:
+                continue
+
+            selection = aoi.selection_config or {}
+            try:
+                dataset_item_ids = [UUID(str(v)) for v in (selection.get("dataset_item_ids") or [])]
+                dataset_ids = [UUID(str(v)) for v in (selection.get("dataset_ids") or [])]
+            except (ValueError, TypeError):
+                continue
+
+            item_query = select(DatasetItem).where(
+                DatasetItem.organization_id == organization_id,
+                DatasetItem.is_active.is_(True),
+            )
+            if dataset_item_ids:
+                item_query = item_query.where(DatasetItem.id.in_(dataset_item_ids))
+            elif dataset_ids:
+                item_query = item_query.where(DatasetItem.dataset_id.in_(dataset_ids))
+            else:
+                continue
+
+            items = (await self.db.scalars(item_query)).all()
+            if not items:
+                continue
+            if len(items) == 1:
+                # Only one candidate item selected for this AOI at all —
+                # unambiguous regardless of footprint precision.
+                return items[0].id
+
+            matches = [item for item in items if item.geometry and shape_geom(item.geometry).contains(point)]
+            if len(matches) == 1:
+                return matches[0].id
+            return None  # multiple overlapping items, no unique match — don't guess
+
         return None
 
     async def verify_annotation(

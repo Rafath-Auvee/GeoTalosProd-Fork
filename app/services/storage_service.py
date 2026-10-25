@@ -8,6 +8,7 @@ so the SSL/credential setup cost is paid once, not per-call.
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import uuid
@@ -369,7 +370,27 @@ def delete_objects_by_prefix(org_id: uuid.UUID, prefix: str) -> int:
     return deleted_count
 
 
+def object_size(org_id: uuid.UUID, s3_key: str) -> int | None:
+    """Size in bytes of one object, or None when it does not exist."""
+    try:
+        return int(_s3_client().head_object(Bucket=bucket_name(org_id), Key=s3_key)["ContentLength"])
+    except Exception:  # noqa: BLE001
+        return None
+
+
 # ── Download presigning ───────────────────────────────────────────────────────
+
+def get_object_bytes(org_id: uuid.UUID, s3_key: str) -> bytes:
+    """Read one object's full body. For small artifacts (job manifests,
+    per-tile target JSON) — not meant for large files."""
+    client = _s3_client()
+    obj = client.get_object(Bucket=bucket_name(org_id), Key=s3_key)
+    return obj["Body"].read()
+
+
+def get_object_json(org_id: uuid.UUID, s3_key: str) -> dict:
+    return json.loads(get_object_bytes(org_id, s3_key))
+
 
 def generate_download_url(
     org_id: uuid.UUID,

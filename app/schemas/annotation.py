@@ -18,6 +18,13 @@ class AnnotationCreate(ORMModel):
         description="Image this geometry was drawn/detected on. Ignored if the target "
         "annotation_set is itself scoped to a single dataset_item — that value wins.",
     )
+    map_id: UUID | None = Field(
+        default=None,
+        description="Map this geometry was drawn on, if any — used only to stamp soft "
+        "aoi_id/aoi_name provenance onto properties when the geometry falls inside a "
+        "tracked AOI on that map (see MapAOI, geoops.dino_tasks). Not persisted as a "
+        "column; has no effect if omitted.",
+    )
 
 
 class AnnotationCreateOnMap(ORMModel):

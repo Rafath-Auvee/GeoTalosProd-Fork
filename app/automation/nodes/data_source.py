@@ -15,10 +15,6 @@ def _parse_bbox_4326(raw_bbox: list[float]) -> list[float]:
     return [minx, miny, maxx, maxy]
 
 
-def _bbox_intersects(a: list[float], b: list[float]) -> bool:
-    return max(a[0], b[0]) < min(a[2], b[2]) and max(a[1], b[1]) < min(a[3], b[3])
-
-
 def _geometry_intersects_bbox(geometry: dict | None, bbox_4326: list[float]) -> bool:
     if not geometry:
         return False
@@ -386,7 +382,7 @@ def execute_aoi_filter(session, config, input_data, **kwargs):
     color="#3B82F6",
 )
 def execute_search_map_aoi_resources(session, config, input_data, **kwargs):
-    from sqlalchemy import distinct, func, select
+    from sqlalchemy import Text, cast, distinct, func, select
 
     from app.models.annotation import Annotation
     from app.models.annotation_set import AnnotationSet
@@ -399,14 +395,22 @@ def execute_search_map_aoi_resources(session, config, input_data, **kwargs):
     if not map_row:
         raise ValueError(f"Map {config['map_id']} not found")
     bbox_4326 = _parse_bbox_4326(config["aoi_bbox"])
+    envelope = func.ST_MakeEnvelope(*bbox_4326, 4326)
 
-    all_items = session.execute(
+    # Filtered in SQL via ST_GeomFromGeoJSON(geometry::text) — same
+    # IMMUTABLE cast + GiST expression index (migration 063) the
+    # GET /datasets/{id}/items?bbox= endpoint uses — instead of loading
+    # every active item in the org and intersecting in Python.
+    dataset_items = session.execute(
         select(DatasetItem).where(
             DatasetItem.organization_id == map_row.project.organization_id,
             DatasetItem.is_active.is_(True),
+            DatasetItem.geometry.is_not(None),
+            func.ST_Intersects(
+                func.ST_GeomFromGeoJSON(cast(DatasetItem.geometry, Text)), envelope
+            ),
         )
     ).scalars().all()
-    dataset_items = [item for item in all_items if _geometry_intersects_bbox(item.geometry, bbox_4326)]
     dataset_ids = {item.dataset_id for item in dataset_items}
 
     datasets = []
@@ -421,18 +425,21 @@ def execute_search_map_aoi_resources(session, config, input_data, **kwargs):
             .order_by(Dataset.created_at.desc())
         ).scalars().all()
 
-    raster_candidates = session.execute(
+    # extent_4326 is the same PostGIS column + GiST index (migration 065)
+    # vector_annotation_sets below uses — raster mask sets get it populated
+    # from their dataset_item's footprint by
+    # configure_raster_mask_for_annotation_set. Replaces
+    # raster_config['bounds_4326'], a key nothing in this codebase ever
+    # actually wrote, which made this filter silently match nothing.
+    raster_mask_annotation_sets = session.execute(
         select(AnnotationSet).where(
             AnnotationSet.organization_id == map_row.project.organization_id,
             AnnotationSet.deleted_at.is_(None),
             AnnotationSet.raster_config.is_not(None),
+            AnnotationSet.extent_4326.is_not(None),
+            func.ST_Intersects(AnnotationSet.extent_4326, envelope),
         )
     ).scalars().all()
-    raster_mask_annotation_sets = [
-        aset
-        for aset in raster_candidates
-        if _bbox_intersects((aset.raster_config or {}).get("bounds_4326") or [0, 0, 0, 0], bbox_4326)
-    ]
 
     vector_set_ids = session.execute(
         select(distinct(Annotation.annotation_set_id))
@@ -441,12 +448,7 @@ def execute_search_map_aoi_resources(session, config, input_data, **kwargs):
             Annotation.deleted_at.is_(None),
             AnnotationSet.organization_id == map_row.project.organization_id,
             AnnotationSet.deleted_at.is_(None),
-            func.ST_Intersects(
-                Annotation.geometry,
-                func.ST_MakeEnvelope(
-                    bbox_4326[0], bbox_4326[1], bbox_4326[2], bbox_4326[3], 4326
-                ),
-            ),
+            func.ST_Intersects(Annotation.geometry, envelope),
         )
     ).scalars().all()
     vector_annotation_sets = []

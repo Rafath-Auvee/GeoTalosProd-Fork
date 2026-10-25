@@ -20,8 +20,13 @@ celery_app = Celery(
         "app.workers.bulk.tasks",
         "app.workers.default.tasks",
         "geoops.tasks",
+        "geoops.exemplar_tasks",
         "geoops.yolo_tasks",
         "geoops.dino_tasks",
+        "geoops.dino_dataset_tasks",
+        "geoops.sam3_tasks",
+        "geoops.interactive_tasks",
+        "geoops.refine_tasks",
     ],
 )
 
@@ -41,8 +46,12 @@ celery_app.conf.update(
         "app.workers.inference.tasks.*": {"queue": "inference"},
         "app.workers.default.tasks.*": {"queue": "default"},
         "geoops.tasks.*": {"queue": "embedding"},
+        "geoops.exemplar_tasks.*": {"queue": "embedding"},
         "geoops.yolo_tasks.*": {"queue": "training"},
         "geoops.dino_tasks.*": {"queue": "training"},
+        "geoops.dino_dataset_tasks.*": {"queue": "training"},
+        "geoops.sam3_tasks.*": {"queue": "training"},
+        "geoops.interactive_tasks.*": {"queue": "training"},
 
     },
     # Beat schedule

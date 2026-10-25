@@ -415,6 +415,25 @@ class AnnotationSetService:
         annotation_set.deleted_at = datetime.now(UTC).replace(tzinfo=None)
         await self.db.commit()
 
+    async def hard_delete_set(self, set_id: UUID, organization_id: UUID) -> None:
+        """Permanently delete an annotation set and all rows that reference it.
+
+        Looked up ignoring ``deleted_at`` so an already soft-deleted set can
+        still be purged. DB-level ``ondelete="CASCADE"`` on annotations,
+        map/project links, and collection items handles all dependent rows.
+        """
+        result = await self.db.execute(
+            select(AnnotationSet).where(
+                AnnotationSet.id == set_id,
+                AnnotationSet.organization_id == organization_id,
+            )
+        )
+        annotation_set = result.scalar_one_or_none()
+        if annotation_set is None:
+            raise not_found("AnnotationSet")
+        await self.db.delete(annotation_set)
+        await self.db.commit()
+
     async def set_review_status(
         self, set_id: UUID, review_status: str, organization_id: UUID
     ) -> AnnotationSet:

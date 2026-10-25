@@ -39,6 +39,8 @@ class JobType(StrEnum):
     AOI_SCAN = "aoi_scan"
     ANOMALY_DETECTION = "anomaly_detection"
     FINETUNE_MODEL = "finetune_model"
+    EXEMPLAR_SCAN = "exemplar_scan"
+    SAM3_AUTO_ANNOTATE = "sam3_auto_annotate"
 
 
 class MapLayerSourceType(StrEnum):

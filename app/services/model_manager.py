@@ -222,6 +222,35 @@ class ModelManager:
     _METERS_PER_DEGREE_LAT = 110_540.0
     _METERS_PER_DEGREE_LON_AT_EQUATOR = 111_320.0
 
+    @staticmethod
+    def _resolve_scales(output_cfg: dict[str, Any]) -> tuple[list[float | None], list[float]]:
+        """(scales to scan, all trained scales). A model trained on several
+        real-world scales (``patch_sizes_m``) is scanned at each of them —
+        optionally a subset chosen for this run (``scales_m``) to bound cost.
+        Models without the list keep their single ``patch_size_m`` / pixel
+        behaviour, represented as one ``None`` scale."""
+        raw = output_cfg.get("patch_sizes_m")
+        if not isinstance(raw, list) or not raw:
+            return [None], []
+        trained = sorted(float(v) for v in raw if v)
+        subset = output_cfg.get("scales_m")
+        if isinstance(subset, list) and subset:
+            wanted = [float(v) for v in subset]
+            chosen = [v for v in trained if any(abs(v - w) < 1e-6 for w in wanted)]
+            if chosen:
+                return list(chosen), trained
+        return list(trained), trained
+
+    @classmethod
+    def _geom_span_m(cls, geom_4326: dict[str, Any]) -> float:
+        """Longer side (m) of a geometry's bbox — equirectangular, like the
+        rest of this class; fine at tile scale."""
+        min_lon, min_lat, max_lon, max_lat = shape(geom_4326).bounds
+        mid_lat = math.radians((min_lat + max_lat) / 2.0)
+        width = (max_lon - min_lon) * cls._METERS_PER_DEGREE_LON_AT_EQUATOR * math.cos(mid_lat)
+        height = (max_lat - min_lat) * cls._METERS_PER_DEGREE_LAT
+        return max(abs(width), abs(height))
+
     @classmethod
     def _resolve_patch_size_px(cls, output_cfg: dict[str, Any], context: dict[str, Any]) -> int:
         """A model can specify its scan tile either as a fixed pixel count
@@ -306,6 +335,23 @@ class ModelManager:
             "skip_item": False,
         }
 
+    @staticmethod
+    def _train_render_params(item: DatasetItem, recipe: dict[str, Any]) -> dict[str, str]:
+        """TiTiler params reproducing how this model's training tiles were
+        rendered: the recipe's assets/bands plus the same per-item rescale
+        resolution the exporter used (geoops.export_common.resolve_rescale_params)."""
+        from geoops.export_common import resolve_rescale_params  # noqa: PLC0415 — avoid import cycle at load
+
+        params = {
+            "assets": str(recipe.get("assets", "data")),
+            "asset_bidx": str(recipe.get("asset_bidx", "data|1,2,3")),
+        }
+        if recipe.get("rescale") == "auto_per_item":
+            rescale = resolve_rescale_params(item.stac_collection_id, item.stac_item_id).get("rescale")
+            if rescale:
+                params["rescale"] = rescale
+        return params
+
     def _resolve_rendering_config(self, item: DatasetItem) -> dict | None:
         """Pick the rendering_config that defines this item's display params.
 
@@ -331,8 +377,12 @@ class ModelManager:
         patch: dict[str, Any],
         asset_name: str = "data",
         override_params: dict[str, str] | None = None,
+        exact_render: dict[str, str] | None = None,
     ) -> str:
-        """Fetch patch PNG bytes from TiTiler and return base64 payload."""
+        """Fetch patch PNG bytes from TiTiler and return base64 payload.
+
+        ``exact_render`` (a model's pinned training recipe) is used verbatim:
+        no dataset preset, no caller overrides."""
         bbox = patch.get("bbox")
         if not isinstance(bbox, list) or len(bbox) != 4:
             raise ValueError("Patch bbox is required")
@@ -354,12 +404,15 @@ class ModelManager:
         # 2. caller-supplied override_params (UI band selection / rescale chosen for THIS run)
         # 3. bare ``assets`` fallback if neither produced an asset selector
         params: dict[str, str] = {}
-        rendering_config = self._resolve_rendering_config(item)
-        preset_params = _rendering_params_from_config(rendering_config)
-        if preset_params:
-            params.update(preset_params)
-        if override_params:
-            params.update({k: str(v) for k, v in override_params.items() if v is not None})
+        if exact_render is not None:
+            params.update(exact_render)
+        else:
+            rendering_config = self._resolve_rendering_config(item)
+            preset_params = _rendering_params_from_config(rendering_config)
+            if preset_params:
+                params.update(preset_params)
+            if override_params:
+                params.update({k: str(v) for k, v in override_params.items() if v is not None})
         # TiTiler's /bbox/ endpoint requires `assets` to be set even when
         # `asset_bidx` is also present (it doesn't infer one from the other).
         if "assets" not in params:
@@ -559,6 +612,17 @@ class ModelManager:
             render_params = {str(k): str(v) for k, v in raw_render_params.items() if v is not None}
         else:
             render_params = None
+        # Models trained on tiles rendered with a fixed recipe (Train Head
+        # heads) must see imagery rendered the same way: those bands + a
+        # per-item rescale, NOT the dataset preset or the bands open in the
+        # map view. The caller's render_params are ignored for them.
+        train_render = output_cfg.get("train_render")
+        if not isinstance(train_render, dict):
+            train_render = None
+        else:
+            render_params = None
+        scales_to_scan, trained_scales = self._resolve_scales(output_cfg)
+        size_lo, size_hi = (output_cfg.get("size_frac_range") or [0.1, 0.7])[:2]
 
         # Optional translation table for model-emitted labels -> schema class
         # names. Used when the underlying weights file uses a different class
@@ -613,11 +677,21 @@ class ModelManager:
 
             try:
                 context = self._dataset_item_context(item)
-                patch_metadata, capped, aoi_state = self._build_patch_metadata(
-                    item=item,
-                    context=context,
-                    output_cfg=output_cfg,
-                )
+                patch_entries: list[tuple[dict[str, Any], float | None]] = []
+                capped = False
+                aoi_state: dict[str, Any] = {}
+                for scale in scales_to_scan:
+                    scale_cfg = output_cfg if scale is None else {**output_cfg, "patch_size_m": scale}
+                    scale_patches, scale_capped, aoi_state = self._build_patch_metadata(
+                        item=item,
+                        context=context,
+                        output_cfg=scale_cfg,
+                    )
+                    capped = capped or scale_capped
+                    if aoi_state["skip_item"]:
+                        break
+                    patch_entries.extend((p, scale) for p in scale_patches)
+                patch_metadata = [p for p, _ in patch_entries]
                 if aoi_state["skip_item"]:
                     failed += 1
                     job.processed_items = processed
@@ -696,7 +770,7 @@ class ModelManager:
                 # real-world object, so predictions across all of this item's
                 # patches are merged (NMS) before anything is persisted.
                 item_predictions: list[dict[str, Any]] = []
-                for patch in patch_metadata:
+                for patch, patch_scale in patch_entries:
                     patch_context = {
                         **context,
                         "bbox": patch["bbox"],
@@ -709,6 +783,7 @@ class ModelManager:
                         "requested_aoi_bbox": aoi_state["requested_bbox"],
                         "effective_aoi_bbox": aoi_state["effective_bbox"],
                         "used_full_item": aoi_state["used_full_item"],
+                        "scale_m": patch_scale,
                     }
                     # Resolve the prompt for THIS patch. Adapters with a
                     # prompt_resolver (e.g. SAM3 bbox exemplars) reproject the
@@ -730,6 +805,7 @@ class ModelManager:
                             patch=patch,
                             asset_name=patch_asset,
                             override_params=render_params,
+                            exact_render=self._train_render_params(item, train_render) if train_render else None,
                         )
                         raw_output = self._call_model(
                             model=model,
@@ -792,6 +868,16 @@ class ModelManager:
                         if not isinstance(geom, dict):
                             continue
                         geom_4326 = self._validate_geojson_4326(geom)
+                        if patch_scale is not None and len(trained_scales) > 1:
+                            # A detection much bigger/smaller than this scale's
+                            # tile is a fragment/speck the head wasn't trained
+                            # to size at this scale — a neighbouring scale owns
+                            # it. The finest/coarsest scale keeps its extremes.
+                            frac = self._geom_span_m(geom_4326) / patch_scale
+                            if (frac < size_lo and patch_scale != trained_scales[0]) or (
+                                frac > size_hi and patch_scale != trained_scales[-1]
+                            ):
+                                continue
                         properties = dict(pred.get("properties") or {})
                         properties.update(
                             {
@@ -799,6 +885,7 @@ class ModelManager:
                                 "georef_metadata": patch_context,
                                 "model_meta": model_meta,
                                 "patch": patch,
+                                "scan_scale_m": patch_scale,
                             }
                         )
                         item_predictions.append(
