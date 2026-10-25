@@ -691,15 +691,30 @@ services:
     # Generic backbone+head training/serving service — DINOv2 today, other
     # backbones later, all behind one set of routes (see geoops-service/app).
     # Separate build context / image from the main app: keeps ML deps
-    # (torch, transformers — added in a later increment) out of api/worker
-    # images. No GPU reservation yet — the NVIDIA Container Toolkit isn't
-    # configured on this host; add a `deploy.resources.reservations.devices`
-    # block here once it is. Runs fine CPU-only in the meantime.
+    # (torch, transformers) out of api/worker images. GPU reservation below
+    # requires the NVIDIA Container Toolkit + `nvidia` runtime registered
+    # with the Docker daemon (confirmed via `docker run --gpus all ...
+    # nvidia-smi`) — app/device.py falls back to CPU automatically if a GPU
+    # somehow isn't visible, so this block is safe even on a host that
+    # temporarily loses toolkit config.
     build:
       context: ./geoops-service
       dockerfile: Dockerfile
     restart: unless-stopped
     container_name: awakeforest-geoops-service
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              # Pin to one GPU rather than "all": this host's 4x L40S are
+              # shared with other jobs. Default picks index 3 — the one idle
+              # GPU as of this change (0-2 were at 85-100% util); that's a
+              # snapshot, not a guarantee, so override
+              # GEOOPS_SERVICE_GPU_DEVICE_ID (single index) with `nvidia-smi`
+              # in hand if the actual free GPU differs by the time this runs.
+              device_ids: ["${GEOOPS_SERVICE_GPU_DEVICE_ID:-3}"]
+              capabilities: [gpu]
     environment:
       API_TOKEN: ${GEOOPS_SERVICE_API_TOKEN:?GEOOPS_SERVICE_API_TOKEN must be set}
       # MinIO/S3 — same bucket-per-org convention geoops's export tasks write
@@ -712,8 +727,19 @@ services:
       AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin_pass}
       AWS_S3_FORCE_PATH_STYLE: "true"
       S3_BUCKET_PREFIX: ${S3_BUCKET_PREFIX:-org-}
+      SAM3_MODEL_PATH: /srv/models/sam3.pt
+      YOLO_CONFIG_DIR: /tmp/Ultralytics
     volumes:
       - geoops-service-model-cache:/srv/model-cache
+      # SAM3 checkpoint (~3.4GB) — not built by this repo, so bind-mounted
+      # read-only from wherever it lives on the host rather than baked into
+      # the image or downloaded at build time. Override
+      # SAM3_MODEL_HOST_PATH if it lives elsewhere on a given host.
+      - ${SAM3_MODEL_HOST_PATH:-/home/prass25/projects/GreenMark/models/sam3.pt}:/srv/models/sam3.pt:ro
+      # Pretrained YOLO weights to start a YOLO training from (e.g. yolo26l.pt). Drop files in this folder.
+      - ${YOLO_MODELS_HOST_DIR:-/home/prass25/projects/GreenMark/models/yolo}:/srv/models/yolo:ro
+    # Ultralytics' data loader workers share memory through /dev/shm; Docker's 64 MB default is too small.
+    shm_size: "8gb"
     ports:
       - "${GEOOPS_SERVICE_PORT:-8020}:8000"
     depends_on:
