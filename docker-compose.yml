@@ -400,6 +400,7 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin_pass}
       MINIO_CORS_ALLOW_ORIGIN: ${MINIO_CORS_ALLOW_ORIGIN:-*}
+      MARTIN_TILES_PASSWORD: ${MARTIN_TILES_PASSWORD:-martin_tiles_pass}
     entrypoint: >
       /bin/sh -c "
         set -e
@@ -409,6 +410,16 @@ services:
         mc mb --ignore-existing local/awakeforest-exports
         mc mb --ignore-existing local/awakeforest-jobs
         mc mb --ignore-existing local/org-00000000-0000-0000-0000-000000000001
+        # Public reference layers (PMTiles), read by Martin
+        mc mb --ignore-existing local/reference-tiles
+        # Martin gets its own read-only user for that bucket (never the root credentials)
+        echo '{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":[\"s3:GetObject\"],\"Resource\":[\"arn:aws:s3:::reference-tiles/*\"]},{\"Effect\":\"Allow\",\"Action\":[\"s3:ListBucket\",\"s3:GetBucketLocation\"],\"Resource\":[\"arn:aws:s3:::reference-tiles\"]}]}' > /tmp/reference-tiles-read.json
+
+        mc admin policy create local reference-tiles-read /tmp/reference-tiles-read.json || true
+
+        mc admin user add local martin-tiles $$MARTIN_TILES_PASSWORD || true
+
+        mc admin policy attach local reference-tiles-read --user martin-tiles || true
 
         # ---- APPLY ALL GLOBAL CORS SETTINGS IN ONE SHOT ----
         echo 'Configuring global CORS...'
@@ -720,12 +731,14 @@ services:
       # Never use celery_worker here — it has write access and BYPASSRLS.
       DATABASE_URL: postgresql://martin_reader:${MARTIN_READER_PASSWORD:-martin_pass}@app-db:5432/geoplat
       PORT: 3000
+      # Large public reference layers: PMTiles files in the MinIO reference-tiles bucket,
+      # read with a read-only MinIO user (created by minio-setup). Used by config.yaml.
+      MARTIN_TILES_USER: martin-tiles
+      MARTIN_TILES_PASSWORD: ${MARTIN_TILES_PASSWORD:-martin_tiles_pass}
     # Explicit config — prevents auto-discovery from exposing unintended tables.
     command: --config /config.yaml
     volumes:
       - ./infra/docker/martin/config.yaml:/config.yaml:ro
-      # Pre-built public reference tilesets (Tippecanoe .mbtiles), read-only.
-      - ${REFERENCE_TILES_DIR:-./data/reference-tiles}:/tiles:ro
     # ports:
     #   - "${MARTIN_PORT:-3000}:3000"
     depends_on:
@@ -740,6 +753,7 @@ services:
       interval: 60s
     networks:
       - awakeforest-backend
+      - awakeforest-storage  # PMTiles in MinIO
     labels:
       com.awakeforest.service: martin
       com.awakeforest.role: tile-server

@@ -66,11 +66,29 @@ postgres:
       schema: public
       function: annotation_set_mvt
 
-# Public reference layers: every <name>.mbtiles in the mounted /tiles folder
-# becomes source <name>. A folder (not a file list) so a missing or not-yet-built
-# tileset cannot stop Martin, which would take the annotation tiles down too.
-# Only names in REFERENCE_LAYERS (app/api/v1/endpoints/reference_layers.py)
-# are exposed by the API.
-mbtiles:
-  paths:
-    - /tiles
+    # Public reference layer served live from PostGIS (migration 074). Small layers
+    # only; large ones are PMTiles below. Only names in REFERENCE_LAYERS
+    # (app/api/v1/endpoints/reference_layers.py) are exposed by the API.
+    ramsar:
+      schema: reference
+      function: ramsar_mvt
+
+# Large public reference layers: PMTiles files in the MinIO reference-tiles bucket
+# (scripts/reference_layers/). The source name is the Martin id used in REFERENCE_LAYERS
+# (app/api/v1/endpoints/reference_layers.py). Martin reads them as the read-only MinIO
+# user created by minio-setup; the password comes from the environment.
+pmtiles:
+  allow_http: true
+  endpoint: http://minio:9000
+  region: us-east-1
+  virtual_hosted_style_request: false   # MinIO needs path-style URLs
+  access_key_id: ${MARTIN_TILES_USER}
+  secret_access_key: ${MARTIN_TILES_PASSWORD}
+  sources:
+    cofopri: s3://reference-tiles/cofopri.pmtiles
+    raisg_protected_areas: s3://reference-tiles/raisg_protected_areas.pmtiles
+    raisg_mining: s3://reference-tiles/raisg_mining.pmtiles
+    gfw_mining: s3://reference-tiles/gfw_mining.pmtiles
+    gfw_logging: s3://reference-tiles/gfw_logging.pmtiles
+    hydrorivers: s3://reference-tiles/hydrorivers.pmtiles
+    mrds: s3://reference-tiles/mrds.pmtiles

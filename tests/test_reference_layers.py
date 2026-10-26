@@ -1,6 +1,6 @@
 """Public reference-layer tile route: allowlist, bounds, auth and headers.
 
-Martin is mocked; only allowlisted mbtiles source ids may reach it.
+Martin is mocked; only allowlisted source ids may reach it.
 """
 
 from unittest.mock import AsyncMock
@@ -13,7 +13,8 @@ from app.middleware import clerk_auth
 
 @pytest.fixture()
 def martin(client, monkeypatch):
-    """Mock Martin: a tilejson for ``/ramsar`` and tile bytes for any tile URL."""
+    """Mock Martin: a tilejson for ``/ramsar``, 404 for the other layers' tilejson (not built
+    yet, which the list must skip), and tile bytes for any tile URL."""
 
     async def martin_get(url):
         if url == "/ramsar":
@@ -22,6 +23,8 @@ def martin(client, monkeypatch):
                 json={"name": "Ramsar Sites", "attribution": "RSIS (CC BY 4.0)", "minzoom": 0, "maxzoom": 12},
                 request=httpx.Request("GET", "http://martin" + url),
             )
+        if url.count("/") == 1:  # tilejson of an allowlisted layer Martin does not serve yet
+            return httpx.Response(404, request=httpx.Request("GET", "http://martin" + url))
         return httpx.Response(200, content=b"mvt-bytes", headers={"content-type": "application/x-protobuf"})
 
     mock = AsyncMock(side_effect=martin_get)

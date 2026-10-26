@@ -1,6 +1,8 @@
-"""Public reference layers — global, read-only static tilesets.
+"""Public reference layers — global, read-only.
 
-Pre-built Tippecanoe .mbtiles served by Martin (see infra/docker/martin/config.yaml).
+Served by Martin (see infra/docker/martin/config.yaml): small layers live in PostGIS
+(the `reference` schema), large ones are Tippecanoe PMTiles in the MinIO
+reference-tiles bucket. Build and load scripts: scripts/reference_layers/.
 They are the same for every organization, so there is no org check and the
 tiles are publicly cacheable. Callers still need a signed-in session
 (ClerkAuthMiddleware). Only names in REFERENCE_LAYERS are forwarded, so this
@@ -19,8 +21,19 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/reference-layers", tags=["reference-layers"])
 
-# Martin mbtiles source ids exposed to the frontend. Add one entry per tileset.
-REFERENCE_LAYERS: tuple[str, ...] = ("ramsar",)
+# Martin source ids exposed to the frontend. Add one entry per layer. A layer whose
+# source is missing in Martin (not built or uploaded yet) is skipped in the list and
+# returns 404 for tiles, so this can name layers before they exist.
+REFERENCE_LAYERS: tuple[str, ...] = (
+    "ramsar",  # PostGIS, reference.ramsar
+    "cofopri",  # PMTiles from here on
+    "raisg_protected_areas",
+    "raisg_mining",
+    "gfw_mining",
+    "gfw_logging",
+    "hydrorivers",
+    "mrds",
+)
 
 # Static tilesets only change when rebuilt, and the rebuild is deployed together
 # with a restart, so one day is a safe browser cache lifetime.
