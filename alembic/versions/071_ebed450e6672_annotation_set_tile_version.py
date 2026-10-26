@@ -34,6 +34,10 @@ def upgrade() -> None:
 
     # SECURITY DEFINER: the bump must not be skipped by RLS on annotation_sets.
     # It only touches sets referenced by rows the caller just wrote.
+    # FOR NO KEY UPDATE, not FOR UPDATE: an INSERT holds a KEY SHARE lock on its
+    # annotation_sets row (the foreign key), and FOR UPDATE conflicts with it, so two
+    # writers into one set each waited on the other and deadlocked. NO KEY UPDATE
+    # still serializes writers but does not conflict with KEY SHARE.
     # ponytail: any UPDATE bumps, including property-only edits the tile does
     # not render; filter on rendered columns if needless cache misses matter.
     op.execute(
@@ -50,14 +54,14 @@ def upgrade() -> None:
                 WHERE id IN (
                     SELECT s.id FROM annotation_sets s
                     WHERE s.id IN (SELECT annotation_set_id FROM new_rows)
-                    ORDER BY s.id FOR UPDATE
+                    ORDER BY s.id FOR NO KEY UPDATE
                 );
             ELSIF TG_OP = 'DELETE' THEN
                 UPDATE annotation_sets SET tile_version = tile_version + 1
                 WHERE id IN (
                     SELECT s.id FROM annotation_sets s
                     WHERE s.id IN (SELECT annotation_set_id FROM old_rows)
-                    ORDER BY s.id FOR UPDATE
+                    ORDER BY s.id FOR NO KEY UPDATE
                 );
             ELSE  -- UPDATE: old and new sets both change when annotations move
                 UPDATE annotation_sets SET tile_version = tile_version + 1
@@ -68,7 +72,7 @@ def upgrade() -> None:
                         UNION
                         SELECT annotation_set_id FROM new_rows
                     )
-                    ORDER BY s.id FOR UPDATE
+                    ORDER BY s.id FOR NO KEY UPDATE
                 );
             END IF;
             RETURN NULL;
