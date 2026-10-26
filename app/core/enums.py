@@ -36,6 +36,11 @@ class JobType(StrEnum):
     IMPORT_ANNOTATIONS = "import_annotations"
     VECTORIZE_RASTER_MASK = "vectorize_raster_mask"
     RASTERIZE_ANNOTATION_SET = "rasterize_annotation_set"
+    AOI_SCAN = "aoi_scan"
+    ANOMALY_DETECTION = "anomaly_detection"
+    FINETUNE_MODEL = "finetune_model"
+    EXEMPLAR_SCAN = "exemplar_scan"
+    SAM3_AUTO_ANNOTATE = "sam3_auto_annotate"
 
 
 class MapLayerSourceType(StrEnum):

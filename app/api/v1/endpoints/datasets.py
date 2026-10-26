@@ -4,7 +4,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
-from sqlalchemy import select
+from sqlalchemy import Text, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_session, require_org_role
@@ -101,6 +101,8 @@ async def _get_upload_job(
 @router.get("", response_model=DatasetListResponse)
 async def list_datasets(
     organization_id: UUID | None = Query(default=None),
+    q: str | None = Query(default=None, description="Case-insensitive substring match on dataset name"),
+    status: str | None = Query(default=None, description="Filter by dataset status (e.g. 'ready')"),
     limit: int = Depends(limit_param),
     offset: int = Depends(offset_param),
     org_id: UUID = Depends(require_org_role("org:viewer")),
@@ -114,6 +116,8 @@ async def list_datasets(
         limit=limit,
         offset=offset,
         organization_id=org_id,
+        q=q,
+        status=status,
     )
     return DatasetListResponse(items=items, total=total, limit=limit, offset=offset)
 
@@ -189,12 +193,81 @@ async def delete_dataset_by_id(
     )
 
 
+@router.delete("/{dataset_id}/purge", status_code=status.HTTP_204_NO_CONTENT)
+async def purge_dataset(
+    dataset_id: UUID,
+    org_id: UUID = Depends(require_org_role("org:admin")),
+    db: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Permanently delete a raster dataset: its pgSTAC collection and items, its files in
+    S3 (``datasets/{id}/``), and the database rows (items, project links and map layers go with
+    it via cascade). Irreversible, and it also purges already soft-deleted datasets.
+
+    Annotation sets made on this imagery are kept; they lose only their link to it.
+    Order matters: STAC and S3 first, the dataset row last, so a failure part-way leaves the
+    row in place and the purge can simply be run again.
+    """
+    from sqlalchemy import delete as sa_delete, text as sa_text  # noqa: PLC0415
+    from sqlalchemy import create_engine  # noqa: PLC0415
+
+    from app.models.dataset import Dataset  # noqa: PLC0415
+
+    dataset = await db.scalar(select(Dataset).where(Dataset.id == dataset_id, Dataset.organization_id == org_id))
+    if dataset is None:
+        raise not_found("Dataset")
+    collection_id = dataset.stac_collection_id
+    name = dataset.name
+
+    def drop_stac_and_files() -> int:
+        if collection_id and settings.STAC_SYNC_DATABASE_URL:
+            engine = create_engine(settings.STAC_SYNC_DATABASE_URL)
+            try:
+                with engine.begin() as conn:
+                    # pgSTAC removes the collection's items along with it.
+                    conn.execute(sa_text("SELECT pgstac.delete_collection(:c)"), {"c": collection_id})
+            except Exception as exc:  # noqa: BLE001
+                # A collection that was never written (or is already gone) is not an error.
+                if "not found" not in str(exc).lower() and "does not exist" not in str(exc).lower():
+                    raise
+            finally:
+                engine.dispose()
+        return storage_service.delete_objects_by_prefix(org_id, f"datasets/{dataset_id}/")
+
+    files = await asyncio.to_thread(drop_stac_and_files)
+    await db.execute(sa_delete(Dataset).where(Dataset.id == dataset_id, Dataset.organization_id == org_id))
+    await db.commit()
+    await log_audit_event(
+        action="datasets.purge", actor_id=str(current_user.id), organization_id=str(org_id),
+        entity="dataset", entity_id=str(dataset_id), session=db,
+        extra={"name": name, "files_deleted": files},
+    )
+
+
 # ── Dataset items ─────────────────────────────────────────────────────────────
+
+
+def _parse_items_bbox(bbox: str) -> list[float]:
+    try:
+        parts = [float(v.strip()) for v in bbox.split(",")]
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="bbox must be comma-separated numbers") from exc
+    if len(parts) != 4:
+        raise HTTPException(status_code=400, detail="bbox must be minx,miny,maxx,maxy")
+    minx, miny, maxx, maxy = parts
+    if minx >= maxx or miny >= maxy:
+        raise HTTPException(status_code=400, detail="bbox must have minx < maxx and miny < maxy")
+    return parts
 
 
 @router.get("/{dataset_id}/items", response_model=DatasetItemListResponse)
 async def list_dataset_items(
     dataset_id: UUID,
+    bbox: str | None = Query(
+        default=None,
+        description="Optional minx,miny,maxx,maxy (EPSG:4326) — only items whose geometry "
+        "intersects this are returned. Without it, results are unfiltered chronological.",
+    ),
     limit: int = Depends(limit_param),
     offset: int = Depends(offset_param),
     org_id: UUID = Depends(require_org_role("org:viewer")),
@@ -206,8 +279,6 @@ async def list_dataset_items(
     Results are ordered by ``item_datetime`` ascending so the frontend can
     build a chronological timeline.  Only active items are returned.
     """
-    from sqlalchemy import select  # noqa: PLC0415
-
     # Verify the dataset belongs to this org (raises 404 if not)
     service = DatasetService(db)
     await service.get_dataset(dataset_id, organization_id=org_id)
@@ -216,9 +287,24 @@ async def list_dataset_items(
         select(DatasetItem)
         .where(DatasetItem.dataset_id == dataset_id, DatasetItem.is_active.is_(True))
     )
-    total_result = await db.execute(
-        base_q.with_only_columns(__import__("sqlalchemy").func.count())
-    )
+
+    if bbox is not None:
+        # DatasetItem.geometry is plain JSONB, not a PostGIS column — but
+        # ST_GeomFromGeoJSON(geometry::text) is IMMUTABLE in PostGIS, so it
+        # can be filtered (and indexed — see migration 063's
+        # idx_dataset_items_geom_gist) directly in SQL instead of loading
+        # every active item in the dataset and intersecting in Python.
+        # Same cast pattern already used in
+        # app/automation/nodes/data_source.py's execute_aoi_filter.
+        bbox_4326 = _parse_items_bbox(bbox)
+        geom_expr = func.ST_GeomFromGeoJSON(cast(DatasetItem.geometry, Text))
+        envelope = func.ST_MakeEnvelope(*bbox_4326, 4326)
+        base_q = base_q.where(
+            DatasetItem.geometry.is_not(None),
+            func.ST_Intersects(geom_expr, envelope),
+        )
+
+    total_result = await db.execute(base_q.with_only_columns(func.count()))
     total = total_result.scalar_one()
 
     rows = await db.scalars(

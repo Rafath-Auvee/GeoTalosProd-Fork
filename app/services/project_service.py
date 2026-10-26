@@ -46,11 +46,16 @@ class ProjectService:
 
     async def get_project(self, project_id: UUID, organization_id: UUID | None = None) -> Project:
         if organization_id is None:
-            project = await self.db.get(Project, project_id)
+            result = await self.db.execute(
+                select(Project).where(Project.id == project_id, Project.deleted_at.is_(None))
+            )
+            project = result.scalar_one_or_none()
         else:
             result = await self.db.execute(
                 select(Project).where(
-                    Project.id == project_id, Project.organization_id == organization_id
+                    Project.id == project_id,
+                    Project.organization_id == organization_id,
+                    Project.deleted_at.is_(None),
                 )
             )
             project = result.scalar_one_or_none()

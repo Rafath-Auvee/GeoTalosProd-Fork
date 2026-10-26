@@ -38,6 +38,9 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-S
     
     CREATE EXTENSION IF NOT EXISTS pgcrypto;      -- for gen_random_bytes (used by extensions)
     CREATE EXTENSION IF NOT EXISTS ltree;         -- for hierarchical paths in annotation_classes
+    -- pgvector: created here (superuser) because migration 049 runs as app_user,
+    -- which cannot CREATE EXTENSION on a fresh database.
+    CREATE EXTENSION IF NOT EXISTS vector;
 
     ---------------------------------------------------------------------------
     -- app_user

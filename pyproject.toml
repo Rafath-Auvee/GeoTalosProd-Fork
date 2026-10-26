@@ -3,7 +3,7 @@ name = "awakeforest"
 version = "0.1.0"
 description = "AwakeForest Geospatial Platform"
 authors = ["AwakeForest Team"]
-packages = [{ include = "app" }]
+packages = [{ include = "app" }, { include = "geoops" }]
 
 [tool.poetry.dependencies]
 python = "^3.11"
@@ -36,12 +36,21 @@ rasterio = "^1.4"
 shapely = "^2.0"
 pypgstac = "^0.9.2"
 
+# Exemplar-scan overlap merge (Detections.with_nms) — pure numpy/opencv, no
+# torch. (sahi was considered for the slicing step too, but sahi>=0.11 hard-
+# depends on torch>=2.4.1 even just to import sahi.slicing — would drag the
+# full torch/CUDA stack into this image, which the geoops-service split
+# exists to avoid. Overlapping-tile slicing is reimplemented directly in
+# geoops/exemplar_tasks.py instead.)
+supervision = "^0.25"
+
 # HTTP client (STAC proxy, alert webhooks)
 httpx = "^0.28"
 
 # Auth
 svix = "^1.37"
 python-jose = { extras = ["cryptography"], version = "^3.3" }
+pgvector = "^0.5.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3"

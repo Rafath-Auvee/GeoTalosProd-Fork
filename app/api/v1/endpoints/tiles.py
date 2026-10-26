@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Any
 from urllib.parse import quote
 from uuid import UUID
@@ -44,6 +45,41 @@ router = APIRouter(prefix="/tiles", tags=["tiles"])
 
 # Module-level httpx client with connection pooling to titiler.
 _titiler_proxy_client: httpx.AsyncClient | None = None
+
+# In-process TTL cache for raster mask config (colormap, stac ids, band index).
+# A single raster layer needs dozens of tile requests per viewport, and each
+# one was paying a full DB round trip (through a SECURITY DEFINER function)
+# before this cache existed — that per-tile DB hit was the main contributor
+# to slow raster-mask loading. The config rarely changes, so a short TTL is
+# enough; `configure_raster_mask_for_annotation_set` also invalidates the
+# entry explicitly on update so edits show up immediately rather than
+# waiting out the TTL.
+_RASTER_CONFIG_CACHE_TTL_SECONDS = 60.0
+_raster_config_cache: dict[UUID, tuple[float, dict | None]] = {}
+
+
+def invalidate_raster_config_cache(annotation_set_id: UUID) -> None:
+    _raster_config_cache.pop(annotation_set_id, None)
+
+
+async def _get_raster_config_cached(annotation_set_id: UUID) -> dict | None:
+    from app.db.session import AsyncSessionLocal  # noqa: PLC0415
+    from sqlalchemy import text as sa_text  # noqa: PLC0415
+
+    now = time.monotonic()
+    cached = _raster_config_cache.get(annotation_set_id)
+    if cached is not None and now - cached[0] < _RASTER_CONFIG_CACHE_TTL_SECONDS:
+        return cached[1]
+
+    async with AsyncSessionLocal() as session:
+        row = await session.execute(
+            sa_text("SELECT get_raster_config_public(:id)"),
+            {"id": str(annotation_set_id)},
+        )
+        raster_cfg = row.scalar_one_or_none()
+
+    _raster_config_cache[annotation_set_id] = (now, raster_cfg)
+    return raster_cfg
 
 
 def _get_proxy_client() -> httpx.AsyncClient:
@@ -193,15 +229,7 @@ async def proxy_raster_mask_tile(
     for this single read-only, non-sensitive field (rendering metadata only —
     no org/user/geometry data is exposed).
     """
-    from app.db.session import AsyncSessionLocal  # noqa: PLC0415
-    from sqlalchemy import text as sa_text  # noqa: PLC0415
-
-    async with AsyncSessionLocal() as session:
-        row = await session.execute(
-            sa_text("SELECT get_raster_config_public(:id)"),
-            {"id": str(annotation_set_id)},
-        )
-        raster_cfg = row.scalar_one_or_none()
+    raster_cfg = await _get_raster_config_cached(annotation_set_id)
 
     if raster_cfg is None:
         raise HTTPException(

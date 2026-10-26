@@ -1,0 +1,34 @@
+# geoops-service — GPU model-training/serving microservice.
+#
+# CUDA build (cu124), matching the host's NVIDIA driver 550.54.15 / CUDA 12.4
+# (confirmed working via `docker run --gpus all ... nvidia-smi` once the
+# NVIDIA Container Toolkit was configured — see docker-compose.yml's GPU
+# reservation on this service). app/device.py falls back to CPU at runtime
+# if no GPU is visible to the container, so this same image still runs
+# (just slower) on a host without the toolkit configured.
+--extra-index-url https://download.pytorch.org/whl/cu124
+torch==2.5.1+cu124
+torchvision==0.20.1+cu124
+
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+pydantic==2.9.2
+pydantic-settings==2.6.1
+boto3==1.35.36
+transformers==4.46.3
+pillow==11.0.0
+numpy==2.1.3
+
+# SAM3 box+text auto-annotate (/autoannotate — app/sam3_infer.py). Ships its
+# own SAM3 model code (ultralytics.models.sam) on top of the torch/torchvision
+# already pinned above.
+ultralytics==8.4.164
+# SAM3's image encoder needs CLIP; ultralytics otherwise tries to pip-install
+# this itself at first inference (build_sam3_image_model's "AutoUpdate"),
+# which is unreliable at request time (needs `git`, network, and silently
+# eats the first real request's latency) — pin it into the image build
+# instead, same as any other dependency.
+git+https://github.com/ultralytics/CLIP.git
+
+# Hyperparameter search (app/tuning.py) — in-memory study only; results are persisted by the API (Postgres).
+optuna==4.1.0

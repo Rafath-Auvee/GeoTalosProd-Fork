@@ -87,7 +87,16 @@ def execute_overlay_on_map(session, config, input_data, **kwargs):
     color="#06B6D4",
 )
 def execute_overlay_dataset_on_map(session, config, input_data, **kwargs):
-    """Create a MapLayer row pointing at the dataset."""
+    """Create a MapLayer row pointing at the dataset — idempotent on
+    (map_id, dataset_id), same as execute_overlay_on_map does for
+    annotation sets above. A pipeline re-run/retry hitting this node twice
+    for the same map+dataset must not insert a second row: map_layers now
+    has a unique index on (map_id, dataset_id) WHERE source_type='dataset'
+    (migration 062), so an unconditional insert here would raise an
+    unhandled IntegrityError instead of just creating a silent duplicate.
+    """
+    from sqlalchemy import select
+
     from app.models.map_layer import MapLayer
 
     dataset = input_data.get("dataset", {})
@@ -95,12 +104,25 @@ def execute_overlay_dataset_on_map(session, config, input_data, **kwargs):
     if not dataset_id:
         return {"dataset": dataset}
 
+    map_id = uuid.UUID(config["map_id"])
+    dataset_uuid = uuid.UUID(dataset_id)
+
+    existing = session.execute(
+        select(MapLayer).where(
+            MapLayer.map_id == map_id,
+            MapLayer.source_type == "dataset",
+            MapLayer.dataset_id == dataset_uuid,
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        return {"dataset": {**dataset, "map_layer_id": str(existing.id)}}
+
     layer = MapLayer(
-        map_id=uuid.UUID(config["map_id"]),
+        map_id=map_id,
         name=config.get("layer_name") or dataset.get("name") or "Dataset Layer",
         layer_type="raster",
         source_type="dataset",
-        dataset_id=uuid.UUID(dataset_id),
+        dataset_id=dataset_uuid,
         visible=True,
         opacity=1.0,
     )

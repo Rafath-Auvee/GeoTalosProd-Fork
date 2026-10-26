@@ -2,8 +2,7 @@ from uuid import UUID
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from shapely.geometry import box, shape
-from sqlalchemy import distinct, false, func, select
+from sqlalchemy import Text, cast, distinct, false, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_session, require_org_role
@@ -34,6 +33,22 @@ from app.services import titiler_service
 
 router = APIRouter(prefix="/maps", tags=["maps"])
 
+# Module-level httpx client, reused across requests — matches the pooled-client
+# pattern in stac.py/tiles.py. list_map_aoi_resources previously opened a brand
+# new httpx.AsyncClient (and TCP connection) on every single call, which this
+# endpoint makes every time a user opens or draws an AOI.
+_stac_proxy_client: httpx.AsyncClient | None = None
+
+
+def _get_stac_proxy_client() -> httpx.AsyncClient:
+    global _stac_proxy_client
+    if _stac_proxy_client is None or _stac_proxy_client.is_closed:
+        _stac_proxy_client = httpx.AsyncClient(
+            base_url=settings.STAC_API_URL,
+            timeout=30.0,
+        )
+    return _stac_proxy_client
+
 
 def _parse_bbox(bbox: str) -> list[float]:
     try:
@@ -48,19 +63,6 @@ def _parse_bbox(bbox: str) -> list[float]:
     if minx < -180 or maxx > 180 or miny < -90 or maxy > 90:
         raise HTTPException(status_code=400, detail="bbox must be within EPSG:4326 bounds")
     return parts
-
-
-def _bbox_intersects(a: list[float], b: list[float]) -> bool:
-    return max(a[0], b[0]) < min(a[2], b[2]) and max(a[1], b[1]) < min(a[3], b[3])
-
-
-def _geometry_intersects_bbox(geometry: dict | None, bbox_4326: list[float]) -> bool:
-    if not geometry:
-        return False
-    try:
-        return shape(geometry).intersects(box(*bbox_4326))
-    except Exception:
-        return False
 
 
 async def _org_collection_ids(db: AsyncSession, org_id: UUID) -> set[str]:
@@ -235,18 +237,21 @@ async def list_map_dataset_items_in_aoi(
     if dataset_id not in dataset_ids:
         raise HTTPException(status_code=404, detail="Dataset not found on this map")
 
-    items = (
-        await db.execute(
-            select(DatasetItem).where(
-                DatasetItem.dataset_id == dataset_id,
-                DatasetItem.organization_id == org_id,
-                DatasetItem.is_active.is_(True),
-            )
-        )
+    geom_expr = func.ST_GeomFromGeoJSON(cast(DatasetItem.geometry, Text))
+    envelope = func.ST_MakeEnvelope(bbox_4326[0], bbox_4326[1], bbox_4326[2], bbox_4326[3], 4326)
+    base_query = select(DatasetItem).where(
+        DatasetItem.dataset_id == dataset_id,
+        DatasetItem.organization_id == org_id,
+        DatasetItem.is_active.is_(True),
+        DatasetItem.geometry.is_not(None),
+        func.ST_Intersects(geom_expr, envelope),
+    )
+    count_query = select(func.count()).select_from(base_query.subquery())
+    total = (await db.execute(count_query)).scalar_one()
+    rows = (
+        await db.execute(base_query.order_by(DatasetItem.created_at.desc()).limit(limit).offset(offset))
     ).scalars().all()
-    matched = [item for item in items if _geometry_intersects_bbox(item.geometry, bbox_4326)]
-    page = matched[offset : offset + limit]
-    return DatasetItemListResponse(items=page, total=len(matched), limit=limit, offset=offset)
+    return DatasetItemListResponse(items=rows, total=total, limit=limit, offset=offset)
 
 
 @router.get("/{map_id}/aoi/resources", response_model=MapAOIResourcesRead)
@@ -257,6 +262,16 @@ async def list_map_aoi_resources(
     db: AsyncSession = Depends(get_session),
     _current_user: User = Depends(get_current_user),
 ):
+    # Sequential on the single request-scoped `db` session. An earlier
+    # version of this endpoint ran the raster/vector lookups concurrently
+    # via asyncio.gather on their own ad-hoc sessions — that tripled the
+    # number of DB connections a single request holds at once, and with
+    # this engine's pool_size=5 / default pool_timeout=30s, a handful of
+    # concurrent requests was enough to exhaust the pool and make new
+    # connection acquisition block for the full 30s timeout. Reverted:
+    # correctness/indexing fixes (pooled STAC client, extent_4326-based
+    # raster/vector queries, the annotation_set_id index) are kept — those
+    # are the real, safe wins.
     bbox_4326 = _parse_bbox(bbox)
     service = MapService(db)
     await service.get_map(map_id, organization_id=org_id)
@@ -270,11 +285,11 @@ async def list_map_aoi_resources(
             "bbox": bbox_4326,
             "limit": 500,
         }
-        async with httpx.AsyncClient(base_url=settings.STAC_API_URL, timeout=30.0) as client:
-            try:
-                resp = await client.post("/search", json=search_body)
-            except httpx.RequestError as exc:
-                raise HTTPException(status_code=503, detail="STAC service is unavailable") from exc
+        client = _get_stac_proxy_client()
+        try:
+            resp = await client.post("/search", json=search_body)
+        except httpx.RequestError as exc:
+            raise HTTPException(status_code=503, detail="STAC service is unavailable") from exc
         if resp.status_code >= 500:
             raise HTTPException(status_code=502, detail="STAC service returned an error")
         stac_body = resp.json()
@@ -342,32 +357,20 @@ async def list_map_aoi_resources(
             }
         )
 
-    raster_candidates = (
+    # extent_4326 is the same PostGIS column + GiST index (migration 065)
+    # vector_annotation_sets' trigger-maintained bbox uses below — raster
+    # mask sets now get it populated from their dataset_item's footprint by
+    # configure_raster_mask_for_annotation_set, replacing a
+    # raster_config['bounds_4326'] key that nothing ever actually wrote.
+    raster_mask_annotation_sets = (
         await db.execute(
             select(AnnotationSet).where(
                 AnnotationSet.organization_id == org_id,
                 AnnotationSet.deleted_at.is_(None),
                 AnnotationSet.raster_config.is_not(None),
-            )
-        )
-    ).scalars().all()
-    raster_mask_annotation_sets = [
-        aset
-        for aset in raster_candidates
-        if _bbox_intersects((aset.raster_config or {}).get("bounds_4326") or [0, 0, 0, 0], bbox_4326)
-    ]
-
-    vector_annotation_sets: list[AnnotationSet] = []
-    vector_set_ids = (
-        await db.execute(
-            select(distinct(Annotation.annotation_set_id))
-            .join(AnnotationSet, AnnotationSet.id == Annotation.annotation_set_id)
-            .where(
-                Annotation.deleted_at.is_(None),
-                AnnotationSet.organization_id == org_id,
-                AnnotationSet.deleted_at.is_(None),
+                AnnotationSet.extent_4326.is_not(None),
                 func.ST_Intersects(
-                    Annotation.geometry,
+                    AnnotationSet.extent_4326,
                     func.ST_MakeEnvelope(
                         bbox_4326[0], bbox_4326[1], bbox_4326[2], bbox_4326[3], 4326
                     ),
@@ -375,16 +378,23 @@ async def list_map_aoi_resources(
             )
         )
     ).scalars().all()
-    if vector_set_ids:
-        vector_annotation_sets = (
-            await db.execute(
-                select(AnnotationSet).where(
-                    AnnotationSet.id.in_(vector_set_ids),
-                    AnnotationSet.organization_id == org_id,
-                    AnnotationSet.deleted_at.is_(None),
-                )
+
+    vector_annotation_sets = (
+        await db.execute(
+            select(AnnotationSet).where(
+                AnnotationSet.organization_id == org_id,
+                AnnotationSet.deleted_at.is_(None),
+                AnnotationSet.raster_config.is_(None),
+                AnnotationSet.extent_4326.is_not(None),
+                func.ST_Intersects(
+                    AnnotationSet.extent_4326,
+                    func.ST_MakeEnvelope(
+                        bbox_4326[0], bbox_4326[1], bbox_4326[2], bbox_4326[3], 4326
+                    ),
+                ),
             )
-        ).scalars().all()
+        )
+    ).scalars().all()
 
     return MapAOIResourcesRead(
         bbox=bbox_4326,

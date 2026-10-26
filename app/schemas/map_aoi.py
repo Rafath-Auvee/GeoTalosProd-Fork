@@ -129,6 +129,7 @@ class MapAOIInferenceCreate(ORMModel):
     patch_size_px: int | None = Field(default=None, ge=64, le=4096)
     stride_px: int | None = Field(default=None, ge=32, le=4096)
     max_patches_per_item: int | None = Field(default=None, ge=1, le=4096)
+    scales_m: list[float] | None = Field(default=None, max_length=8)
 
     def to_inference_job(
         self,
@@ -151,4 +152,5 @@ class MapAOIInferenceCreate(ORMModel):
             patch_size_px=self.patch_size_px,
             stride_px=self.stride_px,
             max_patches_per_item=self.max_patches_per_item,
+            scales_m=self.scales_m,
         )

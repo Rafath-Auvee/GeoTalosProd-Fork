@@ -13,6 +13,18 @@ class AnnotationCreate(ORMModel):
     geometry: dict
     confidence: float | None = None
     properties: dict | None = None
+    dataset_item_id: UUID | None = Field(
+        default=None,
+        description="Image this geometry was drawn/detected on. Ignored if the target "
+        "annotation_set is itself scoped to a single dataset_item — that value wins.",
+    )
+    map_id: UUID | None = Field(
+        default=None,
+        description="Map this geometry was drawn on, if any — used only to stamp soft "
+        "aoi_id/aoi_name provenance onto properties when the geometry falls inside a "
+        "tracked AOI on that map (see MapAOI, geoops.dino_tasks). Not persisted as a "
+        "column; has no effect if omitted.",
+    )
 
 
 class AnnotationCreateOnMap(ORMModel):
@@ -24,6 +36,12 @@ class AnnotationCreateOnMap(ORMModel):
     properties: dict | None = None
     schema_id: UUID | None = None
     dataset_id: UUID | None = None
+    dataset_item_id: UUID | None = Field(
+        default=None,
+        description="Image this geometry was drawn on, if the map has one focused "
+        "(e.g. a single-item view). Required for this annotation to later be usable in a "
+        "YOLO training export if it ends up in a dataset-wide (multi-item) set.",
+    )
     set_name: str | None = Field(default=None, max_length=255)
 
 
@@ -38,6 +56,7 @@ class AnnotationRead(ORMModel):
     id: UUID
     annotation_set_id: UUID
     class_id: UUID
+    dataset_item_id: UUID | None
     geometry: dict
     confidence: float | None
     properties: dict | None

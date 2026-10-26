@@ -105,6 +105,24 @@ async def _create_inference_job(
             "render_params": payload.render_params or None,
         }
     )
+    if (model.output_config or {}).get("scale_locked") and (
+        payload.patch_size_px is not None or payload.stride_px is not None
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="This model was trained at fixed real-world scales; patch size and stride can't be "
+            "overridden. Use scales_m to scan a subset of its trained scales.",
+        )
+    trained_scales = (model.output_config or {}).get("patch_sizes_m") or []
+    if payload.scales_m:
+        if not trained_scales:
+            raise HTTPException(status_code=422, detail="This model has no trained scales to choose from.")
+        unknown = [v for v in payload.scales_m if not any(abs(v - float(t)) < 1e-6 for t in trained_scales)]
+        if unknown:
+            raise HTTPException(
+                status_code=422, detail=f"scales_m {unknown} are not among the model's trained scales {trained_scales}"
+            )
+        run_output_config["scales_m"] = payload.scales_m
     if payload.patch_size_px is not None:
         run_output_config["patch_size_px"] = payload.patch_size_px
     if payload.stride_px is not None:

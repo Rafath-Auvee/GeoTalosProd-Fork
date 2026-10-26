@@ -6,22 +6,27 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select, text
+from sqlalchemy import delete as sa_delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.api.deps import get_current_user, get_session, require_org_role
+from app.api.v1.endpoints.tiles import invalidate_raster_config_cache
 from app.config import settings
 from app.core.audit import log_audit_event
 from app.core.deps import limit_param, offset_param
 from app.core.enums import JobStatus, JobType
-from app.core.geometry import serialize_geometry
+from app.core.geometry import parse_geometry, serialize_geometry
+from app.models.annotation import Annotation
 from app.models.annotation_class import AnnotationClass
+from app.models.annotation_set import AnnotationSet
 from app.models.annotation_schema import AnnotationSchema
 from app.models.dataset_item import DatasetItem
 from app.models.job import Job
 from app.models.user import User
 from app.schemas.annotation_set import (
+    AnnotationSetBulkPurgeRequest,
+    AnnotationSetBulkPurgeResponse,
     AnnotationSetCreate,
     AnnotationSetExportRequest,
     AnnotationSetExportResponse,
@@ -193,7 +198,53 @@ async def list_annotation_sets(
         limit=limit, offset=offset, organization_id=org_id,
         source_type=source_type, schema_id=schema_id, dataset_id=dataset_id, model_id=model_id,
     )
-    return AnnotationSetListResponse(items=items, total=total, limit=limit, offset=offset)
+    ids = [s.id for s in items]
+    counts = dict(
+        (await db.execute(
+            select(Annotation.annotation_set_id, func.count())
+            .where(Annotation.annotation_set_id.in_(ids), Annotation.deleted_at.is_(None))
+            .group_by(Annotation.annotation_set_id)
+        )).all()
+    ) if ids else {}
+    schema_ids = {s.schema_id for s in items if s.schema_id}
+    names = dict(
+        (await db.execute(select(AnnotationSchema.id, AnnotationSchema.name).where(AnnotationSchema.id.in_(schema_ids)))).all()
+    ) if schema_ids else {}
+    rows = [
+        AnnotationSetRead.model_validate(s).model_copy(
+            update={"annotation_count": int(counts.get(s.id, 0)), "schema_name": names.get(s.schema_id)}
+        )
+        for s in items
+    ]
+    return AnnotationSetListResponse(items=rows, total=total, limit=limit, offset=offset)
+
+
+@router.post("/bulk-purge", response_model=AnnotationSetBulkPurgeResponse)
+async def bulk_purge_annotation_sets(
+    payload: AnnotationSetBulkPurgeRequest,
+    org_id: UUID = Depends(require_org_role("org:admin")),
+    db: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Permanently delete many annotation sets (and their annotations) in one transaction.
+
+    Same effect as calling ``DELETE /{set_id}/purge`` for each id, but all-or-nothing and one
+    round trip. Ids that do not belong to this organization are reported, not deleted.
+    """
+    ids = set(payload.ids)
+    found = set((await db.scalars(
+        select(AnnotationSet.id).where(AnnotationSet.id.in_(ids), AnnotationSet.organization_id == org_id)
+    )).all())
+    if found:
+        await db.execute(sa_delete(AnnotationSet).where(AnnotationSet.id.in_(found), AnnotationSet.organization_id == org_id))
+        await db.commit()
+    for sid in found:
+        invalidate_raster_config_cache(sid)
+        await log_audit_event(
+            action="annotation_sets.hard_delete", actor_id=str(current_user.id),
+            organization_id=str(org_id), entity="annotation_set", entity_id=str(sid), session=db,
+        )
+    return AnnotationSetBulkPurgeResponse(deleted=len(found), missing=sorted(ids - found))
 
 
 @router.get("/{set_id}", response_model=AnnotationSetRead)
@@ -266,8 +317,30 @@ async def delete_annotation_set(
     current_user: User = Depends(get_current_user),
 ):
     await AnnotationSetService(db).delete_set(set_id, organization_id=org_id)
+    invalidate_raster_config_cache(set_id)
     await log_audit_event(
         action="annotation_sets.delete", actor_id=str(current_user.id),
+        organization_id=str(org_id), entity="annotation_set", entity_id=str(set_id), session=db,
+    )
+
+
+@router.delete("/{set_id}/purge", status_code=status.HTTP_204_NO_CONTENT)
+async def hard_delete_annotation_set(
+    set_id: UUID,
+    org_id: UUID = Depends(require_org_role("org:admin")),
+    db: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Permanently delete an annotation set and every annotation in it.
+
+    Unlike ``DELETE /{set_id}`` (soft delete), this is irreversible and also
+    purges sets that were already soft-deleted. Dependent rows (annotations,
+    map/project mounts) are removed via DB-level cascade.
+    """
+    await AnnotationSetService(db).hard_delete_set(set_id, organization_id=org_id)
+    invalidate_raster_config_cache(set_id)
+    await log_audit_event(
+        action="annotation_sets.hard_delete", actor_id=str(current_user.id),
         organization_id=str(org_id), entity="annotation_set", entity_id=str(set_id), session=db,
     )
 
@@ -506,7 +579,17 @@ async def configure_raster_mask_for_annotation_set(
         "value_class_map": {k: str(v) for k, v in value_class_map.items()},
         "colormap": colormap,
     }
+    # Populate extent_4326 (the same PostGIS column + GiST index vector
+    # annotation sets get from the annotations_extent_aiud trigger — raster
+    # sets have no `annotations` rows to fire that trigger, so it has to be
+    # set explicitly here) from the underlying raster file's footprint.
+    # This replaces raster_config['bounds_4326'], a key nothing in this
+    # codebase ever actually wrote, which made the AOI panel's raster-mask
+    # intersection filter silently match nothing.
+    if item.geometry:
+        annotation_set.extent_4326 = parse_geometry(item.geometry)
     await db.commit()
+    invalidate_raster_config_cache(annotation_set.id)
 
     await log_audit_event(
         action="annotation_sets.raster_config.update", actor_id=str(current_user.id),

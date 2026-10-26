@@ -56,6 +56,12 @@ class InferenceJobCreate(ORMModel):
     patch_size_px: int | None = Field(default=None, ge=64, le=4096)
     stride_px: int | None = Field(default=None, ge=32, le=4096)
     max_patches_per_item: int | None = Field(default=None, ge=1, le=4096)
+    scales_m: list[float] | None = Field(
+        default=None,
+        max_length=8,
+        description="Models trained on several real-world scales scan all of them by default; set this to "
+        "restrict a run to a subset (metres, must be among the model's trained patch_sizes_m).",
+    )
 
     @model_validator(mode="after")
     def validate_aoi_bbox(self):
