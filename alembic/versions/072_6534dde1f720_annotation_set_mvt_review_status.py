@@ -9,14 +9,14 @@ distinction. This adds ``review_status`` to each tile feature.
 Every set's tile_version is advanced so no cached tile (Redis or Martin)
 without the new property can be served.
 
-Revision ID: e1f2a3b4c5d6
-Revises: d0e1f2a3b4c5
+Revision ID: 6534dde1f720
+Revises: ebed450e6672
 Create Date: 2026-10-04
 """
 from alembic import op
 
-revision = "e1f2a3b4c5d6"
-down_revision = "d0e1f2a3b4c5"
+revision = "6534dde1f720"
+down_revision = "ebed450e6672"
 branch_labels = None
 depends_on = None
 

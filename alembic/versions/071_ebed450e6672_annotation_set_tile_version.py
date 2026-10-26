@@ -13,15 +13,15 @@ An update that moves annotations advances both the old and the new set.
 The increment runs in the writer's transaction, so a rollback undoes it and
 the row lock on annotation_sets serializes concurrent increments.
 
-Revision ID: d0e1f2a3b4c5
-Revises: c9d0e1f2a3b4
+Revision ID: ebed450e6672
+Revises: 7c3e91d2b45a
 Create Date: 2026-10-03
 """
 from alembic import op
 import sqlalchemy as sa
 
-revision = "d0e1f2a3b4c5"
-down_revision = "c9d0e1f2a3b4"
+revision = "ebed450e6672"
+down_revision = "7c3e91d2b45a"
 branch_labels = None
 depends_on = None
 
