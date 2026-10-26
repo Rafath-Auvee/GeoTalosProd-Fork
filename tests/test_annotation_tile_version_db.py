@@ -1,4 +1,4 @@
-"""Opt-in PostgreSQL checks for the annotation_sets.tile_version triggers (migration 049).
+"""Opt-in PostgreSQL checks for the annotation_sets.tile_version triggers (migration 071).
 
 Run with TILE_DB_TESTS=1 in the local API container. Each test creates its own
 organization, schema, class and sets as app_user under RLS, inside one
